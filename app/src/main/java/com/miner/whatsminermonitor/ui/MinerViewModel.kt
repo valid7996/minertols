@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
+import java.net.HttpURLConnection
 import java.net.URL
 
 class MinerViewModel(application: Application) : AndroidViewModel(application) {
@@ -29,68 +30,224 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
     private val _foundCount = MutableStateFlow(0)
     val foundCount: StateFlow<Int> = _foundCount
 
-    // قیمت BTC به تومان (برای بازار ایران)
     private val _btcPriceToman = MutableStateFlow<Long?>(null)
     val btcPriceToman: StateFlow<Long?> = _btcPriceToman
 
-    // قیمت BTC به دلار (USDT)
     private val _btcPriceUsdt = MutableStateFlow<Double?>(null)
     val btcPriceUsdt: StateFlow<Double?> = _btcPriceUsdt
 
-    // نرخ دلار به تومان
     private val _usdToToman = MutableStateFlow<Long?>(null)
     val usdToToman: StateFlow<Long?> = _usdToToman
+
+    // منبع قیمت که الان استفاده می‌شه
+    private val _priceSource = MutableStateFlow<String?>(null)
+    val priceSource: StateFlow<String?> = _priceSource
 
     private val listMutex = Mutex()
 
     init {
-        fetchBitcoinPrice()
+        fetchPrices()
     }
 
     /**
-     * دریافت قیمت بیتکوین از API عمومی
-     * قیمت دلاری از CoinGecko و نرخ تبدیل تقریبی بازار آزاد ایران
+     * دریافت قیمت‌ها با اولویت‌بندی:
+     * 1. Nobitex (بهترین منبع برای قیمت ریال ایران - BTC/RLS و USDT/RLS)
+     * 2. Wallex (صرافی ایرانی دیگر)
+     * 3. Binance USDT قیمت + نرخ تخمینی بازار آزاد
      */
-    private fun fetchBitcoinPrice() {
+    private fun fetchPrices() {
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                // قیمت BTC به دلار از CoinGecko
-                val url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
-                val response = URL(url).readText()
-                val json = JSONObject(response)
-                val usdPrice = json.getJSONObject("bitcoin").getDouble("usd")
-                _btcPriceUsdt.value = usdPrice
+            var success = false
 
-                // نرخ دلار به تومان از API ایرانی (navasan یا تخمینی)
-                try {
-                    val navaUrl = "https://api.navasan.tech/latest/?api=free&item=usd_buy"
-                    val navaResp = URL(navaUrl).readText()
-                    val navaJson = JSONObject(navaResp)
-                    val rate = navaJson.optDouble("value", 0.0)
-                    if (rate > 0) {
-                        _usdToToman.value = rate.toLong()
-                        _btcPriceToman.value = (usdPrice * rate).toLong()
-                    } else {
-                        // تخمین پیش‌فرض در صورت عدم دسترسی
-                        val defaultRate = 86_000L
-                        _usdToToman.value = defaultRate
-                        _btcPriceToman.value = (usdPrice * defaultRate).toLong()
-                    }
-                } catch (e: Exception) {
-                    // نرخ تخمینی در صورت عدم دسترسی به API ایرانی
-                    val defaultRate = 86_000L
-                    _usdToToman.value = defaultRate
-                    _btcPriceToman.value = (usdPrice * defaultRate).toLong()
-                }
+            // ===== روش ۱: Nobitex - دقیق‌ترین قیمت بازار ایران =====
+            if (!success) {
+                success = tryNobitex()
+            }
 
-            } catch (e: Exception) {
-                // اگر اینترنت نبود مقادیر null می‌ماند
+            // ===== روش ۲: Wallex =====
+            if (!success) {
+                success = tryWallex()
+            }
+
+            // ===== روش ۳: Binance + تخمین نرخ دلار =====
+            if (!success) {
+                success = tryBinanceWithEstimate()
+            }
+
+            // ===== روش ۴: CoinGecko =====
+            if (!success) {
+                tryCoinGecko()
             }
         }
     }
 
+    /**
+     * Nobitex: قیمت BTC و USDT به ریال (RLS) - دقیق‌ترین نرخ بازار ایران
+     * API عمومی و بدون نیاز به احراز هویت
+     * endpoint: POST https://api.nobitex.ir/market/stats
+     */
+    private fun tryNobitex(): Boolean {
+        return try {
+            // دریافت قیمت USDT/RLS برای محاسبه نرخ دلار
+            val usdtConn = URL("https://api.nobitex.ir/market/stats").openConnection() as HttpURLConnection
+            usdtConn.apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+                connectTimeout = 5000
+                readTimeout = 5000
+                doOutput = true
+            }
+            usdtConn.outputStream.write("""{"srcCurrency":"usdt","dstCurrency":"rls"}""".toByteArray())
+            val usdtResponse = usdtConn.inputStream.bufferedReader().readText()
+            val usdtJson = JSONObject(usdtResponse)
+
+            // قیمت USDT به ریال (تقسیم بر ۱۰ برای تومان)
+            val usdtStats = usdtJson.optJSONObject("stats")?.optJSONObject("usdt-rls")
+            val usdtPriceRls = usdtStats?.optString("bestSell")?.toDoubleOrNull()
+                ?: usdtStats?.optString("latest")?.toDoubleOrNull()
+            val usdtPriceToman = usdtPriceRls?.div(10.0)  // ریال به تومان
+
+            // دریافت قیمت BTC/RLS
+            val btcConn = URL("https://api.nobitex.ir/market/stats").openConnection() as HttpURLConnection
+            btcConn.apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+                connectTimeout = 5000
+                readTimeout = 5000
+                doOutput = true
+            }
+            btcConn.outputStream.write("""{"srcCurrency":"btc","dstCurrency":"rls"}""".toByteArray())
+            val btcResponse = btcConn.inputStream.bufferedReader().readText()
+            val btcJson = JSONObject(btcResponse)
+
+            val btcStats = btcJson.optJSONObject("stats")?.optJSONObject("btc-rls")
+            val btcPriceRls = btcStats?.optString("bestSell")?.toDoubleOrNull()
+                ?: btcStats?.optString("latest")?.toDoubleOrNull()
+            val btcPriceToman = btcPriceRls?.div(10.0)
+
+            if (usdtPriceToman != null && usdtPriceToman > 0 && btcPriceToman != null && btcPriceToman > 0) {
+                _usdToToman.value = usdtPriceToman.toLong()
+                _btcPriceToman.value = btcPriceToman.toLong()
+                // قیمت BTC به USDT = قیمت BTC به تومان / قیمت USDT به تومان
+                _btcPriceUsdt.value = btcPriceToman / usdtPriceToman
+                _priceSource.value = "نوبیتکس"
+                return true
+            }
+            false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Wallex: صرافی معتبر ایرانی
+     * endpoint: GET https://api.wallex.ir/v1/markets
+     */
+    private fun tryWallex(): Boolean {
+        return try {
+            val conn = URL("https://api.wallex.ir/v1/markets").openConnection() as HttpURLConnection
+            conn.apply {
+                requestMethod = "GET"
+                setRequestProperty("Accept", "application/json")
+                connectTimeout = 5000
+                readTimeout = 5000
+            }
+            val response = conn.inputStream.bufferedReader().readText()
+            val json = JSONObject(response)
+            val result = json.optJSONObject("result")?.optJSONObject("symbols")
+
+            // BTCTMN = BTC به تومان
+            val btcTmn = result?.optJSONObject("BTCTMN")
+            val btcPrice = btcTmn?.optString("stats")?.let { JSONObject(it) }?.optDouble("lastPrice")
+                ?: btcTmn?.optDouble("lastPrice")
+
+            // USDTTMN = USDT به تومان (نرخ دلار)
+            val usdtTmn = result?.optJSONObject("USDTTMN")
+            val usdtPrice = usdtTmn?.optString("stats")?.let { JSONObject(it) }?.optDouble("lastPrice")
+                ?: usdtTmn?.optDouble("lastPrice")
+
+            if (btcPrice != null && btcPrice > 0 && usdtPrice != null && usdtPrice > 0) {
+                _btcPriceToman.value = btcPrice.toLong()
+                _usdToToman.value = usdtPrice.toLong()
+                _btcPriceUsdt.value = btcPrice / usdtPrice
+                _priceSource.value = "والکس"
+                return true
+            }
+            false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Binance: قیمت BTC/USDT جهانی + نرخ تخمینی دلار آزاد
+     * برای کاربرانی که به API ایرانی دسترسی ندارند
+     */
+    private fun tryBinanceWithEstimate(): Boolean {
+        return try {
+            val conn = URL("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT").openConnection() as HttpURLConnection
+            conn.apply {
+                requestMethod = "GET"
+                connectTimeout = 5000
+                readTimeout = 5000
+            }
+            val response = conn.inputStream.bufferedReader().readText()
+            val json = JSONObject(response)
+            val btcUsdt = json.optDouble("price")
+
+            if (btcUsdt > 0) {
+                _btcPriceUsdt.value = btcUsdt
+                // نرخ دلار آزاد ایران: در صورت عدم دسترسی به منابع ایرانی
+                // از یک مقدار پیش‌فرض استفاده می‌کنیم و به کاربر نشان می‌دهیم
+                val estimatedRate = 90_000L  // تومان - نرخ تقریبی
+                _usdToToman.value = estimatedRate
+                _btcPriceToman.value = (btcUsdt * estimatedRate).toLong()
+                _priceSource.value = "بایننس (نرخ دلار تخمینی)"
+                return true
+            }
+            false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * CoinGecko: آخرین fallback
+     */
+    private fun tryCoinGecko(): Boolean {
+        return try {
+            val conn = URL("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,tether&vs_currencies=usd").openConnection() as HttpURLConnection
+            conn.apply {
+                requestMethod = "GET"
+                connectTimeout = 5000
+                readTimeout = 5000
+            }
+            val response = conn.inputStream.bufferedReader().readText()
+            val json = JSONObject(response)
+            val btcUsdt = json.optJSONObject("bitcoin")?.optDouble("usd")
+
+            if (btcUsdt != null && btcUsdt > 0) {
+                _btcPriceUsdt.value = btcUsdt
+                val estimatedRate = 90_000L
+                _usdToToman.value = estimatedRate
+                _btcPriceToman.value = (btcUsdt * estimatedRate).toLong()
+                _priceSource.value = "CoinGecko (نرخ دلار تخمینی)"
+                return true
+            }
+            false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     fun refreshBitcoinPrice() {
-        fetchBitcoinPrice()
+        _priceSource.value = null
+        _btcPriceToman.value = null
+        _btcPriceUsdt.value = null
+        _usdToToman.value = null
+        fetchPrices()
     }
 
     fun startScan() {

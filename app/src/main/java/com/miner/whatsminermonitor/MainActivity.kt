@@ -54,6 +54,7 @@ fun MinerScreen(viewModel: MinerViewModel = viewModel()) {
     val btcPriceUsdt by viewModel.btcPriceUsdt.collectAsState()
     val btcPriceToman by viewModel.btcPriceToman.collectAsState()
     val usdToToman by viewModel.usdToToman.collectAsState()
+    val priceSource by viewModel.priceSource.collectAsState()
 
     Scaffold(
         topBar = {
@@ -61,12 +62,29 @@ fun MinerScreen(viewModel: MinerViewModel = viewModel()) {
                 title = { Text("مانیتور ماینرهای Whatsminer") },
                 actions = {
                     // نمایش قیمت BTC در تاپ‌بار
-                    btcPriceUsdt?.let { price ->
+                    if (btcPriceUsdt != null) {
+                        Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(end = 4.dp)) {
+                            Text(
+                                text = "BTC ${"$%,.0f".format(btcPriceUsdt)}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color(0xFFF7931A),
+                                fontWeight = FontWeight.Bold
+                            )
+                            priceSource?.let {
+                                Text(
+                                    text = it,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 9.sp
+                                )
+                            }
+                        }
+                    } else {
                         Text(
-                            text = "$${"%,.0f".format(price)}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = Color(0xFFF7931A),
-                            modifier = Modifier.padding(end = 8.dp)
+                            text = "در حال دریافت قیمت...",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(end = 4.dp)
                         )
                     }
                     IconButton(onClick = { viewModel.refreshBitcoinPrice() }) {
@@ -116,6 +134,7 @@ fun MinerScreen(viewModel: MinerViewModel = viewModel()) {
                             btcPriceUsdt = btcPriceUsdt,
                             btcPriceToman = btcPriceToman,
                             usdToToman = usdToToman,
+                            priceSource = priceSource,
                             onRefresh = { viewModel.refreshMiner(miner.ip) }
                         )
                     }
@@ -161,6 +180,7 @@ fun MinerCard(
     btcPriceUsdt: Double?,
     btcPriceToman: Long?,
     usdToToman: Long?,
+    priceSource: String?,
     onRefresh: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -361,7 +381,8 @@ fun MinerCard(
                     miner = miner,
                     btcPriceUsdt = btcPriceUsdt,
                     btcPriceToman = btcPriceToman,
-                    usdToToman = usdToToman
+                    usdToToman = usdToToman,
+                    priceSource = priceSource
                 )
             }
         }
@@ -373,7 +394,8 @@ fun IncomeSection(
     miner: MinerInfo,
     btcPriceUsdt: Double?,
     btcPriceToman: Long?,
-    usdToToman: Long?
+    usdToToman: Long?,
+    priceSource: String?
 ) {
     val dailyBtc = miner.estimatedDailyBtc()
     val monthlyBtc = dailyBtc * 30
@@ -485,22 +507,45 @@ fun IncomeSection(
         }
 
         Spacer(modifier = Modifier.height(6.dp))
+        Divider(color = Color(0xFFF7931A).copy(alpha = 0.2f))
+        Spacer(modifier = Modifier.height(4.dp))
+        // نرخ دلار و منبع قیمت
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (usdToToman != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.AttachMoney,
+                        contentDescription = null,
+                        modifier = Modifier.size(11.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                    Text(
+                        " دلار: ${formatNumber(usdToToman.toInt())} ت",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
+            }
+            priceSource?.let {
+                Text(
+                    "منبع: $it",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    fontSize = 9.sp
+                )
+            }
+        }
         Text(
-            "* بر اساس GHSav و قیمت لحظه‌ای BTC | بدون احتساب هزینه برق",
+            "* بر اساس GHSav | بدون احتساب هزینه برق",
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()
         )
-        if (usdToToman != null) {
-            Text(
-                "نرخ دلار: ${formatNumber(usdToToman.toInt())} تومان",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
     }
 }
 
