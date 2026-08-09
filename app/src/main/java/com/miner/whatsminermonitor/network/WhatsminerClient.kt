@@ -11,26 +11,12 @@ import java.io.InputStreamReader
 import java.net.InetSocketAddress
 import java.net.Socket
 
-/**
- * کلاینت ارتباط با ماینرهای Whatsminer از طریق پروتکل JSON روی TCP (سازگار با cgminer API).
- *
- * دستورات خواندنی (read-only) مثل summary / devs / version به صورت پیش‌فرض روی هر
- * ماینر Whatsminai فعال هستند و نیازی به رمزنگاری یا لاگین ندارند. اگر فریمور شما
- * این دستورات ساده متنی را قبول نکرد (خطای اتصال یا پاسخ خالی گرفتید)، یعنی API
- * رمزنگاری‌شده (نسخه‌های جدیدتر Whatsminer) فعال است و باید طبق مستندات رسمی
- * Whatsminer API از توکن/AES استفاده کرد.
- *
- * منبع پروتکل: مستندات رسمی Whatsminer API (whatsminer.com) - پورت پیش‌فرض 4028
- */
 object WhatsminerClient {
 
     const val API_PORT = 4028
     private const val CONNECT_TIMEOUT_MS = 2500
     private const val READ_TIMEOUT_MS = 3000
 
-    /**
-     * بررسی می‌کند که آیا پورت API ماینر روی این IP باز است یا نه (برای اسکن سریع شبکه).
-     */
     suspend fun isPortOpen(ip: String, timeoutMs: Int = 400): Boolean = withContext(Dispatchers.IO) {
         try {
             Socket().use { socket ->
@@ -42,19 +28,14 @@ object WhatsminerClient {
         }
     }
 
-    /**
-     * ارسال یک دستور خام cgminer-style و دریافت پاسخ متنی خام.
-     */
     private suspend fun sendRawCommand(ip: String, command: String): String? = withContext(Dispatchers.IO) {
         try {
             Socket().use { socket ->
                 socket.connect(InetSocketAddress(ip, API_PORT), CONNECT_TIMEOUT_MS)
                 socket.soTimeout = READ_TIMEOUT_MS
-
                 socket.getOutputStream().use { out ->
                     out.write(command.toByteArray(Charsets.UTF_8))
                     out.flush()
-
                     val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
                     val sb = StringBuilder()
                     val buffer = CharArray(4096)
@@ -63,7 +44,6 @@ object WhatsminerClient {
                         if (read == -1) break
                         sb.append(buffer, 0, read)
                     }
-                    // پاسخ ماینر معمولا با کاراکتر null خاتمه پیدا می‌کند
                     sb.toString().trim('\u0000', '\n', '\r', ' ')
                 }
             }
@@ -87,11 +67,11 @@ object WhatsminerClient {
         return runCatching { JSONObject(raw) }.getOrNull()
     }
 
-    /**
-     * اطلاعات کامل یک ماینر روی این IP را جمع‌آوری می‌کند (summary + devs + version).
-     * چون نام کلیدهای JSON بین نسخه‌های مختلف فریمور Whatsminer کمی فرق می‌کند،
-     * این تابع چند نام محتمل را برای هر فیلد امتحان می‌کند.
-     */
+    suspend fun fetchPools(ip: String): JSONObject? {
+        val raw = sendRawCommand(ip, """{"command":"pools"}""") ?: return null
+        return runCatching { JSONObject(raw) }.getOrNull()
+    }
+
     suspend fun queryMiner(ip: String): MinerInfo {
         val summaryRoot = fetchSummary(ip)
         if (summaryRoot == null) {
@@ -103,17 +83,31 @@ object WhatsminerClient {
         val devsArray = devsRoot?.optJSONArray("DEVS")
         val versionRoot = fetchVersion(ip)
         val versionObj = firstArrayObject(versionRoot, "VERSION")
+        val poolsRoot = fetchPools(ip)
+        val poolObj = firstArrayObject(poolsRoot, "POOLS")
 
         val hashboards = parseHashboards(devsArray)
         val avgTemp = hashboards.mapNotNull { it.temperaturePcb ?: it.temperatureChip }
             .takeIf { it.isNotEmpty() }?.average()
 
-        val totalHashrate = findDouble(summaryObj, listOf("MHS 5s", "MHS av", "GHS 5s", "GHS av"))
+        // GHS 5s (لحظه‌ای)
+        val totalHashrate = findDouble(summaryObj, listOf("MHS 5s", "GHS 5s"))
             ?.let { value ->
-                // اگر واحد MHS بود به GHS تبدیل کن، اگر از قبل GHS بود همان را برگردان
-                if (summaryObj?.has("GHS 5s") == true || summaryObj?.has("GHS av") == true) value
+                if (summaryObj?.has("GHS 5s") == true) value
                 else value / 1000.0
             } ?: hashboards.mapNotNull { it.hashrateGhs }.takeIf { it.isNotEmpty() }?.sum()
+
+        // GHS av (میانگین)
+        val ghsAv = findDouble(summaryObj, listOf("MHS av", "GHS av"))
+            ?.let { value ->
+                if (summaryObj?.has("GHS av") == true) value
+                else value / 1000.0
+            }
+
+        // زمان پاسخ پول
+        val poolResponseMs = poolObj?.let {
+            findInt(it, listOf("Ping", "Last Share Time"))
+        } ?: findInt(summaryObj, listOf("Pool Rejected%"))
 
         return MinerInfo(
             ip = ip,
@@ -124,8 +118,13 @@ object WhatsminerClient {
             powerWatt = findInt(summaryObj, listOf("Power", "Power Curr")),
             averageTemperature = avgTemp,
             totalHashrateGhs = totalHashrate,
+            ghsAverage = ghsAv,
             firmwareVersion = findString(versionObj, listOf("Firmware Version", "FIRMWARE_VERSION", "USER")),
             minerType = findString(versionObj, listOf("Type", "MinerType", "PROD")),
+            controlBoard = findString(versionObj, listOf("CompileTime", "API", "CGMiner")),
+            accepted = findInt(summaryObj, listOf("Accepted", "Total Accepted")),
+            rejected = findInt(summaryObj, listOf("Rejected", "Total Rejected", "Hardware Errors")),
+            poolResponseMs = poolResponseMs ?: findInt(summaryObj, listOf("Network Blocks")),
             hashboards = hashboards
         )
     }

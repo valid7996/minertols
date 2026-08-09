@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONObject
+import java.net.URL
 
 class MinerViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -27,7 +29,69 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
     private val _foundCount = MutableStateFlow(0)
     val foundCount: StateFlow<Int> = _foundCount
 
+    // قیمت BTC به تومان (برای بازار ایران)
+    private val _btcPriceToman = MutableStateFlow<Long?>(null)
+    val btcPriceToman: StateFlow<Long?> = _btcPriceToman
+
+    // قیمت BTC به دلار (USDT)
+    private val _btcPriceUsdt = MutableStateFlow<Double?>(null)
+    val btcPriceUsdt: StateFlow<Double?> = _btcPriceUsdt
+
+    // نرخ دلار به تومان
+    private val _usdToToman = MutableStateFlow<Long?>(null)
+    val usdToToman: StateFlow<Long?> = _usdToToman
+
     private val listMutex = Mutex()
+
+    init {
+        fetchBitcoinPrice()
+    }
+
+    /**
+     * دریافت قیمت بیتکوین از API عمومی
+     * قیمت دلاری از CoinGecko و نرخ تبدیل تقریبی بازار آزاد ایران
+     */
+    private fun fetchBitcoinPrice() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // قیمت BTC به دلار از CoinGecko
+                val url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+                val response = URL(url).readText()
+                val json = JSONObject(response)
+                val usdPrice = json.getJSONObject("bitcoin").getDouble("usd")
+                _btcPriceUsdt.value = usdPrice
+
+                // نرخ دلار به تومان از API ایرانی (navasan یا تخمینی)
+                try {
+                    val navaUrl = "https://api.navasan.tech/latest/?api=free&item=usd_buy"
+                    val navaResp = URL(navaUrl).readText()
+                    val navaJson = JSONObject(navaResp)
+                    val rate = navaJson.optDouble("value", 0.0)
+                    if (rate > 0) {
+                        _usdToToman.value = rate.toLong()
+                        _btcPriceToman.value = (usdPrice * rate).toLong()
+                    } else {
+                        // تخمین پیش‌فرض در صورت عدم دسترسی
+                        val defaultRate = 86_000L
+                        _usdToToman.value = defaultRate
+                        _btcPriceToman.value = (usdPrice * defaultRate).toLong()
+                    }
+                } catch (e: Exception) {
+                    // نرخ تخمینی در صورت عدم دسترسی به API ایرانی
+                    val defaultRate = 86_000L
+                    _usdToToman.value = defaultRate
+                    _btcPriceToman.value = (usdPrice * defaultRate).toLong()
+                }
+
+            } catch (e: Exception) {
+                // اگر اینترنت نبود مقادیر null می‌ماند
+            }
+        }
+    }
+
+    fun refreshBitcoinPrice() {
+        fetchBitcoinPrice()
+    }
 
     fun startScan() {
         if (_isScanning.value) return

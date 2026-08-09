@@ -25,13 +25,21 @@ data class MinerInfo(
     val fanSpeedOut: Int? = null,            // دور فن خروجی (RPM)
     val powerWatt: Int? = null,              // مصرف برق تقریبی (وات)
     val averageTemperature: Double? = null,  // میانگین دمای هش‌بردها
-    val totalHashrateGhs: Double? = null,     // هشریت کل دستگاه (GH/s)
+    val totalHashrateGhs: Double? = null,    // هشریت کل دستگاه (GH/s) - GHS 5s
+    val ghsAverage: Double? = null,          // هشریت میانگین (GH/s) - GHS av
     val firmwareVersion: String? = null,
-    val minerType: String? = null,
+    val minerType: String? = null,           // مدل دستگاه
+    val controlBoard: String? = null,        // نسخه کنترل‌برد
+    val accepted: Int? = null,               // تعداد اکسپت‌ها
+    val rejected: Int? = null,               // تعداد رجکت‌ها
+    val poolResponseMs: Int? = null,         // زمان پاسخ پول (ms)
     val hashboards: List<HashboardInfo> = emptyList()
 ) {
     val totalHashrateThs: Double?
         get() = totalHashrateGhs?.div(1000.0)
+
+    val ghsAverageThs: Double?
+        get() = ghsAverage?.div(1000.0)
 
     fun uptimeFormatted(): String {
         val secs = elapsedSeconds ?: return "—"
@@ -42,5 +50,15 @@ data class MinerInfo(
             if (days > 0) append("${days}روز ")
             append("${hours}س ${minutes}د")
         }
+    }
+
+    // محاسبه درآمد روزانه تخمینی (BTC) بر اساس هشریت
+    // فرمول ساده‌شده: (hashrate_TH/s / network_hashrate_TH/s) * block_reward * blocks_per_day
+    // از یک ضریب تخمینی استفاده می‌کنیم که به‌صورت realtime از قیمت استخراج می‌شود
+    fun estimatedDailyBtc(networkHashrateEh: Double = 800.0): Double {
+        val ths = ghsAverageThs ?: totalHashrateThs ?: return 0.0
+        // blocks per day ~= 144, reward = 3.125 BTC
+        // income = (ths / (networkHashrateEh * 1_000_000)) * 144 * 3.125
+        return (ths / (networkHashrateEh * 1_000_000.0)) * 144.0 * 3.125
     }
 }
