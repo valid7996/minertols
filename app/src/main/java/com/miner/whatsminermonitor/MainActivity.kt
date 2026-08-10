@@ -667,10 +667,10 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
             Text("اطلاعات دستگاه", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
             Spacer(modifier = Modifier.height(6.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                DetailField(label = "فریمور", value = miner.firmwareVersion?.take(14) ?: "—")
-                DetailField(label = "کنترل‌برد", value = miner.controlBoard ?: "—")
-                DetailField(label = "پاور", value = miner.powerSupplyModel ?: "—")
-                DetailField(label = "مدل", value = miner.minerType ?: "—")
+                DetailField(label = "فریمور", value = miner.firmwareVersion?.take(14) ?: "—", modifier = Modifier.weight(1f))
+                DetailField(label = "کنترل‌برد", value = miner.controlBoard ?: "—", modifier = Modifier.weight(1f))
+                DetailField(label = "پاور", value = miner.powerSupplyModel ?: "—", modifier = Modifier.weight(1f))
+                DetailField(label = "مدل", value = miner.minerType ?: "—", modifier = Modifier.weight(1f))
             }
 
             Spacer(modifier = Modifier.height(14.dp))
@@ -722,8 +722,8 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
 }
 
 @Composable
-fun DetailField(label: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
+fun DetailField(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(modifier = Modifier.height(2.dp))
         Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 1)
