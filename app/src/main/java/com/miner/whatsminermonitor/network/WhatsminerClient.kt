@@ -72,6 +72,12 @@ object WhatsminerClient {
         return runCatching { JSONObject(raw) }.getOrNull()
     }
 
+    // فهرست کدهای خطای فعال دستگاه (پشتیبانی‌شده در فریمورهای جدیدتر Whatsminer)
+    suspend fun fetchErrorCode(ip: String): JSONObject? {
+        val raw = sendRawCommand(ip, """{"command":"get_error_code"}""") ?: return null
+        return runCatching { JSONObject(raw) }.getOrNull()
+    }
+
     suspend fun queryMiner(ip: String): MinerInfo {
         val summaryRoot = fetchSummary(ip)
         if (summaryRoot == null) {
@@ -85,6 +91,8 @@ object WhatsminerClient {
         val versionObj = firstArrayObject(versionRoot, "VERSION")
         val poolsRoot = fetchPools(ip)
         val poolObj = firstArrayObject(poolsRoot, "POOLS")
+        val errorRoot = fetchErrorCode(ip)
+        val errorCodes = parseErrorCodes(errorRoot)
 
         val hashboards = parseHashboards(devsArray)
         val avgTemp = hashboards.mapNotNull { it.temperaturePcb ?: it.temperatureChip }
@@ -125,8 +133,38 @@ object WhatsminerClient {
             accepted = findInt(summaryObj, listOf("Accepted", "Total Accepted")),
             rejected = findInt(summaryObj, listOf("Rejected", "Total Rejected", "Hardware Errors")),
             poolResponseMs = poolResponseMs ?: findInt(summaryObj, listOf("Network Blocks")),
-            hashboards = hashboards
+            hashboards = hashboards,
+            macAddress = findString(versionObj, listOf("MAC", "Mac", "mac")),
+            powerSupplyModel = findString(versionObj, listOf("PSU", "Power Supply", "PSU Model")),
+            poolWorkerName = findString(poolObj, listOf("User", "Worker")),
+            poolUrl = findString(poolObj, listOf("URL", "Stratum URL")),
+            errorCodes = errorCodes
         )
+    }
+
+    // پارس کردن پاسخ get_error_code به فهرستی از کدهای عددی خطای فعال (کد صفر یعنی بدون خطا)
+    private fun parseErrorCodes(root: JSONObject?): List<Int> {
+        if (root == null) return emptyList()
+        val msg = root.optJSONObject("Msg") ?: root
+        val arr = msg.optJSONArray("error_code")
+            ?: msg.optJSONArray("Error Code")
+            ?: root.optJSONArray("error_code")
+            ?: return emptyList()
+
+        val result = sortedSetOf<Int>()
+        for (i in 0 until arr.length()) {
+            val item = arr.opt(i)
+            val code: Int? = when (item) {
+                is JSONObject -> (item.optString("error_code").ifBlank { null }
+                    ?: item.optString("code").ifBlank { null }
+                    ?: item.optString("ErrCode").ifBlank { null })?.toIntOrNull()
+                is Number -> item.toInt()
+                is String -> item.trim().toIntOrNull()
+                else -> null
+            }
+            if (code != null && code != 0) result.add(code)
+        }
+        return result.toList()
     }
 
     private fun parseHashboards(devsArray: JSONArray?): List<HashboardInfo> {

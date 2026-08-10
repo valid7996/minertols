@@ -33,8 +33,20 @@ data class MinerInfo(
     val accepted: Int? = null,               // تعداد اکسپت‌ها
     val rejected: Int? = null,               // تعداد رجکت‌ها
     val poolResponseMs: Int? = null,         // زمان پاسخ پول (ms)
-    val hashboards: List<HashboardInfo> = emptyList()
+    val hashboards: List<HashboardInfo> = emptyList(),
+    val macAddress: String? = null,          // آدرس MAC (در صورت موجود بودن در پاسخ دستگاه)
+    val powerSupplyModel: String? = null,    // مدل پاور (در صورت موجود بودن)
+    val poolWorkerName: String? = null,      // نام Worker تنظیم‌شده در استخر
+    val poolUrl: String? = null,             // آدرس استخر متصل
+    val errorCodes: List<Int> = emptyList()  // کدهای خطای فعال دستگاه
 ) {
+    // آیا دستگاه سالم است (بدون کد خطای فعال)؟
+    val isHealthy: Boolean
+        get() = isReachable && errorCodes.isEmpty()
+
+    val errorDetails: List<WhatsminerErrorDetail>
+        get() = errorCodes.map { WhatsminerErrorCatalog.describe(it) }
+
     val totalHashrateThs: Double?
         get() = totalHashrateGhs?.div(1000.0)
 
