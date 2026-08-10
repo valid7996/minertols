@@ -155,9 +155,11 @@ object WhatsminerClient {
         for (i in 0 until arr.length()) {
             val item = arr.opt(i)
             val code: Int? = when (item) {
-                is JSONObject -> (item.optString("error_code").ifBlank { null }
-                    ?: item.optString("code").ifBlank { null }
-                    ?: item.optString("ErrCode").ifBlank { null })?.toIntOrNull()
+                is JSONObject -> listOf(
+                    item.optString("error_code"),
+                    item.optString("code"),
+                    item.optString("ErrCode")
+                ).firstOrNull { it.isNotBlank() }?.toIntOrNull()
                 is Number -> item.toInt()
                 is String -> item.trim().toIntOrNull()
                 else -> null
