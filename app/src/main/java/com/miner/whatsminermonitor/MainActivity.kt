@@ -15,6 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -33,6 +34,8 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,9 +46,16 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.miner.whatsminermonitor.model.HashboardInfo
 import com.miner.whatsminermonitor.model.MinerInfo
+import com.miner.whatsminermonitor.model.PoolEntry
+import com.miner.whatsminermonitor.model.PoolProfile
+import com.miner.whatsminermonitor.model.PoolProfiles
 import com.miner.whatsminermonitor.model.WhatsminerErrorDetail
+import com.miner.whatsminermonitor.network.PrivilegedResult
+import com.miner.whatsminermonitor.network.WhatsminerClient
+import com.miner.whatsminermonitor.ui.CredentialsStore
 import com.miner.whatsminermonitor.ui.MinerViewModel
 import com.miner.whatsminermonitor.ui.theme.WhatsminerMonitorTheme
+import kotlinx.coroutines.launch
 import java.net.URLEncoder
 import java.text.NumberFormat
 import java.util.Locale
@@ -567,8 +577,40 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
 
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    var showRebootConfirm by remember { mutableStateOf(false) }
+    var showPoolPicker by remember { mutableStateOf(false) }
+    var poolPendingConfirm by remember { mutableStateOf<PoolProfile?>(null) }
+    var showPasswordDialog by remember { mutableStateOf(false) }
+    var pendingAction by remember { mutableStateOf<PendingPrivilegedAction?>(null) }
+    var isBusy by remember { mutableStateOf(false) }
+
+    suspend fun runPrivileged(action: PendingPrivilegedAction, ipAddr: String) {
+        isBusy = true
+        val password = CredentialsStore.getPassword(context, ipAddr)
+        val result: PrivilegedResult = when (action) {
+            is PendingPrivilegedAction.Reboot -> WhatsminerClient.reboot(ipAddr, password)
+            is PendingPrivilegedAction.SwitchPool -> {
+                val workerName = miner?.poolWorkerName?.takeIf { it.isNotBlank() } ?: "worker1"
+                val entries = action.profile.addresses.map { PoolEntry(url = it, worker = workerName) }
+                WhatsminerClient.updatePools(ipAddr, password, entries)
+            }
+        }
+        isBusy = false
+        if (result.wrongPassword) {
+            pendingAction = action
+            showPasswordDialog = true
+            snackbarHostState.showSnackbar("رمز عبور اشتباه است. رمز صحیح دستگاه را وارد کنید.")
+        } else {
+            snackbarHostState.showSnackbar(result.message)
+            if (result.success) viewModel.refreshMiner(ipAddr)
+        }
+    }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text(miner?.poolWorkerName ?: miner?.minerType ?: "جزئیات دستگاه") },
@@ -679,7 +721,7 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
 
             // ===== وضعیت: زمان فعالیت / تراهش / خطاها =====
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                StatChip(label = "زمان فعالیت", value = miner.uptimeFormatted())
+                UptimeChip(miner = miner)
                 StatChip(
                     label = "تراهش",
                     value = miner.ghsAverageThs?.let { "%.1f TH/s".format(it) } ?: "—",
@@ -691,6 +733,78 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                     color = if (miner.errorCodes.isNotEmpty()) MaterialTheme.colorScheme.error else Color(0xFF4CAF50)
                 )
             }
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // ===== اکسپت‌ها / رجکت‌ها / توان =====
+            Text("📊 وضعیت استخراج", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                StatChip(label = "اکسپت‌ها", value = miner.accepted?.let { formatNumber(it) } ?: "—", color = Color(0xFF4CAF50))
+                StatChip(
+                    label = "رجکت‌ها",
+                    value = miner.rejected?.let { formatNumber(it) } ?: "—",
+                    color = if ((miner.rejected ?: 0) > 0) MaterialTheme.colorScheme.error else Color.Unspecified
+                )
+                StatChip(label = "توان", value = miner.powerWatt?.let { "$it W" } ?: "—", color = Color(0xFFFF9800))
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // ===== دما و فن =====
+            Text("🌡️ دما و فن", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                StatChip(
+                    label = "دمای میانگین",
+                    value = miner.averageTemperature?.let { "%.1f°C".format(it) } ?: "—",
+                    color = tempColor(miner.averageTemperature)
+                )
+                StatChip(label = "فن جلو (ورودی)", value = miner.fanSpeedIn?.let { "$it RPM" } ?: "—")
+                StatChip(label = "فن عقب (خروجی)", value = miner.fanSpeedOut?.let { "$it RPM" } ?: "—")
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // ===== عملیات دستگاه: ریبوت / تغییر پول =====
+            Text("⚙️ عملیات دستگاه", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = { showRebootConfirm = true },
+                    enabled = !isBusy,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Filled.RestartAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("ریبوت دستگاه")
+                }
+                OutlinedButton(
+                    onClick = { showPoolPicker = true },
+                    enabled = !isBusy,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Filled.SwapHoriz, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("تغییر پول")
+                }
+            }
+            if (isBusy) {
+                Spacer(modifier = Modifier.height(6.dp))
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Text(
+                "رمز دستگاه پیش‌فرض «admin» در نظر گرفته می‌شود؛ اگر تغییر کرده باشد به‌صورت خودکار برای وارد کردن رمز صحیح از شما سؤال می‌شود.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp)
+            )
 
             if (miner.hashboards.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(14.dp))
@@ -719,6 +833,130 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
             Spacer(modifier = Modifier.height(24.dp))
         }
     }
+
+    if (miner == null) return
+
+    // ===== دیالوگ تایید ریبوت =====
+    if (showRebootConfirm) {
+        AlertDialog(
+            onDismissRequest = { showRebootConfirm = false },
+            icon = { Icon(Icons.Filled.RestartAlt, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("ریبوت دستگاه") },
+            text = { Text("آیا مطمئن هستید که می‌خواهید این دستگاه ریبوت شود؟ ماینینگ برای چند دقیقه متوقف خواهد شد.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRebootConfirm = false
+                    scope.launch { runPrivileged(PendingPrivilegedAction.Reboot, miner.ip) }
+                }) { Text("بله، ریبوت کن", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRebootConfirm = false }) { Text("انصراف") }
+            }
+        )
+    }
+
+    // ===== دیالوگ انتخاب پروفایل پول =====
+    if (showPoolPicker) {
+        AlertDialog(
+            onDismissRequest = { showPoolPicker = false },
+            title = { Text("انتخاب پول ماینینگ") },
+            text = {
+                Column {
+                    PoolProfiles.all.forEach { profile ->
+                        TextButton(
+                            onClick = {
+                                showPoolPicker = false
+                                poolPendingConfirm = profile
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(profile.displayName, fontWeight = FontWeight.Bold)
+                                Text(
+                                    profile.addresses.first().removePrefix("stratum+tcp://"),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPoolPicker = false }) { Text("انصراف") }
+            }
+        )
+    }
+
+    // ===== دیالوگ تایید تغییر پول (هشدار) =====
+    poolPendingConfirm?.let { profile ->
+        AlertDialog(
+            onDismissRequest = { poolPendingConfirm = null },
+            icon = { Icon(Icons.Filled.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("توجه: تغییر پول ماینینگ") },
+            text = {
+                Text(
+                    "با تایید این عملیات، پول ماینینگ این دستگاه فوراً به «${profile.displayName}» تغییر می‌کند و ماینینگ فعلی قطع و به پول جدید متصل می‌شود. آیا موافقید؟"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val p = profile
+                    poolPendingConfirm = null
+                    scope.launch { runPrivileged(PendingPrivilegedAction.SwitchPool(p), miner.ip) }
+                }) { Text("بله، تغییر بده", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { poolPendingConfirm = null }) { Text("انصراف") }
+            }
+        )
+    }
+
+    // ===== دیالوگ وارد کردن رمز عبور (وقتی رمز پیش‌فرض admin کار نکند) =====
+    if (showPasswordDialog) {
+        var passwordInput by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showPasswordDialog = false },
+            title = { Text("رمز عبور دستگاه") },
+            text = {
+                Column {
+                    Text("رمز عبور پیش‌فرض (admin) روی این دستگاه کار نکرد. لطفاً رمز عبور فعلی ادمین دستگاه را وارد کنید:")
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = passwordInput,
+                        onValueChange = { passwordInput = it },
+                        label = { Text("رمز عبور") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        CredentialsStore.setPassword(context, miner.ip, passwordInput)
+                        showPasswordDialog = false
+                        val action = pendingAction
+                        pendingAction = null
+                        if (action != null) {
+                            scope.launch { runPrivileged(action, miner.ip) }
+                        }
+                    },
+                    enabled = passwordInput.isNotBlank()
+                ) { Text("تایید و تلاش مجدد") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPasswordDialog = false; pendingAction = null }) { Text("انصراف") }
+            }
+        )
+    }
+}
+
+private sealed class PendingPrivilegedAction {
+    object Reboot : PendingPrivilegedAction()
+    data class SwitchPool(val profile: PoolProfile) : PendingPrivilegedAction()
 }
 
 @Composable
@@ -936,6 +1174,35 @@ fun StatChip(label: String, value: String, color: Color = Color.Unspecified) {
             color = if (color != Color.Unspecified) color else MaterialTheme.colorScheme.onSurface
         )
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/**
+ * زمان فعالیت (uptime) را به‌صورت چند بخش جداگانه (روز/ساعت/دقیقه) نمایش می‌دهد
+ * تا اعداد لاتین و کلمات فارسی در یک رشته با هم قاطی نشوند و به‌هم نریزند (مشکل بایدای RTL/LTR)
+ */
+@Composable
+fun UptimeChip(miner: MinerInfo) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        val secs = miner.elapsedSeconds
+        if (secs == null) {
+            Text("—", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+        } else {
+            val days = secs / 86400
+            val hours = (secs % 86400) / 3600
+            val minutes = (secs % 3600) / 60
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (days > 0) {
+                    Text("$days", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Text("روز", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 2.dp))
+                }
+                Text("$hours", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                Text("ساعت", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 2.dp))
+                Text("$minutes", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                Text("دقیقه", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(start = 2.dp))
+            }
+        }
+        Text("زمان فعالیت", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
