@@ -546,6 +546,7 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
     var showRebootConfirm by remember { mutableStateOf(false) }
     var showPoolPicker by remember { mutableStateOf(false) }
     var poolPendingConfirm by remember { mutableStateOf<PoolProfile?>(null) }
+    var showSetPasswordDialog by remember { mutableStateOf(false) }
     var isBusy by remember { mutableStateOf(false) }
 
     suspend fun runPrivileged(action: PendingPrivilegedAction, ipAddr: String) {
@@ -560,8 +561,12 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
             }
         }
         isBusy = false
-        snackbarHostState.showSnackbar(result.message)
-        if (result.success) viewModel.refreshMiner(ipAddr)
+        if (result.wrongPassword) {
+            snackbarHostState.showSnackbar("رمز فعلی اشتباه است. از دکمه 🔑 بالای صفحه رمز واقعی دستگاه را تنظیم کنید.")
+        } else {
+            snackbarHostState.showSnackbar(result.message)
+            if (result.success) viewModel.refreshMiner(ipAddr)
+        }
     }
 
     Scaffold(
@@ -576,6 +581,9 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                 },
                 actions = {
                     if (miner != null) {
+                        IconButton(onClick = { showSetPasswordDialog = true }) {
+                            Icon(Icons.Filled.Key, contentDescription = "تنظیم رمز دستگاه")
+                        }
                         IconButton(onClick = { viewModel.refreshMiner(miner.ip) }) {
                             Icon(Icons.Filled.Refresh, contentDescription = "بروزرسانی")
                         }
@@ -872,6 +880,41 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
             },
             dismissButton = {
                 TextButton(onClick = { poolPendingConfirm = null }) { Text("انصراف") }
+            }
+        )
+    }
+
+    // ===== دیالوگ تنظیم رمز دستگاه (اختیاری، با دکمه 🔑 بالای صفحه باز می‌شود) =====
+    if (showSetPasswordDialog) {
+        var passwordInput by remember { mutableStateOf(CredentialsStore.getPassword(context, miner.ip)) }
+        AlertDialog(
+            onDismissRequest = { showSetPasswordDialog = false },
+            icon = { Icon(Icons.Filled.Key, contentDescription = null) },
+            title = { Text("رمز عبور ادمین دستگاه") },
+            text = {
+                Column {
+                    Text("رمز واقعی ادمین این دستگاه را وارد کنید تا ریبوت و تغییر پول بدون وقفه انجام شود:")
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = passwordInput,
+                        onValueChange = { passwordInput = it },
+                        label = { Text("رمز عبور") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        CredentialsStore.setPassword(context, miner.ip, passwordInput)
+                        showSetPasswordDialog = false
+                    },
+                    enabled = passwordInput.isNotBlank()
+                ) { Text("ذخیره") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSetPasswordDialog = false }) { Text("انصراف") }
             }
         )
     }
