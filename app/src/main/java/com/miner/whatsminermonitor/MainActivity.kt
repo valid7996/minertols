@@ -15,7 +15,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -36,8 +35,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -549,8 +546,6 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
     var showRebootConfirm by remember { mutableStateOf(false) }
     var showPoolPicker by remember { mutableStateOf(false) }
     var poolPendingConfirm by remember { mutableStateOf<PoolProfile?>(null) }
-    var showPasswordDialog by remember { mutableStateOf(false) }
-    var pendingAction by remember { mutableStateOf<PendingPrivilegedAction?>(null) }
     var isBusy by remember { mutableStateOf(false) }
 
     suspend fun runPrivileged(action: PendingPrivilegedAction, ipAddr: String) {
@@ -565,14 +560,8 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
             }
         }
         isBusy = false
-        if (result.wrongPassword) {
-            pendingAction = action
-            showPasswordDialog = true
-            snackbarHostState.showSnackbar("رمز عبور اشتباه است. رمز صحیح دستگاه را وارد کنید.")
-        } else {
-            snackbarHostState.showSnackbar(result.message)
-            if (result.success) viewModel.refreshMiner(ipAddr)
-        }
+        snackbarHostState.showSnackbar(result.message)
+        if (result.success) viewModel.refreshMiner(ipAddr)
     }
 
     Scaffold(
@@ -887,46 +876,6 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
         )
     }
 
-    // ===== دیالوگ وارد کردن رمز عبور (وقتی رمز پیش‌فرض admin کار نکند) =====
-    if (showPasswordDialog) {
-        var passwordInput by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { showPasswordDialog = false },
-            title = { Text("رمز عبور دستگاه") },
-            text = {
-                Column {
-                    Text("رمز عبور پیش‌فرض (admin) روی این دستگاه کار نکرد. لطفاً رمز عبور فعلی ادمین دستگاه را وارد کنید:")
-                    Spacer(modifier = Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = passwordInput,
-                        onValueChange = { passwordInput = it },
-                        label = { Text("رمز عبور") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        CredentialsStore.setPassword(context, miner.ip, passwordInput)
-                        showPasswordDialog = false
-                        val action = pendingAction
-                        pendingAction = null
-                        if (action != null) {
-                            scope.launch { runPrivileged(action, miner.ip) }
-                        }
-                    },
-                    enabled = passwordInput.isNotBlank()
-                ) { Text("تایید و تلاش مجدد") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showPasswordDialog = false; pendingAction = null }) { Text("انصراف") }
-            }
-        )
-    }
 }
 
 private sealed class PendingPrivilegedAction {

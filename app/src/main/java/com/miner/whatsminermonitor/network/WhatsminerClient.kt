@@ -220,9 +220,27 @@ object WhatsminerClient {
         )
     }
 
+    // یک رشتهٔ کد خطا را به عدد تبدیل می‌کند؛ هم فرمت اعشاری معمولی (مثلا "203") و هم فرمت
+    // هگزادسیمال (مثلا "0x0800" یا حتی بدون پیشوند مثل "0800" برای کدهای پاور که در کاتالوگ
+    // هم به‌صورت هگز تعریف شده‌اند) را پشتیبانی می‌کند. قبلاً فقط toIntOrNull ساده استفاده می‌شد
+    // که باعث می‌شد کدهای هگزادسیمال بی‌صدا نادیده گرفته شوند و در نتیجه با وجود خطای واقعی روی
+    // دستگاه، برنامه پیام «سالم» نشان دهد
+    private fun parseCodeToken(raw: String): Int? {
+        val s = raw.trim()
+        if (s.isEmpty()) return null
+        s.toIntOrNull()?.let { return it }
+        if (s.startsWith("0x", ignoreCase = true)) {
+            return s.substring(2).toIntOrNull(16)
+        }
+        return null
+    }
+
     // پارس کردن پاسخ get_error_code به فهرستی از کدهای عددی خطای فعال
     // طبق مستندات رسمی، ساختار پاسخ یک شیء است: {"error_code": {"<code>": "<timestamp>", ...}}
-    // اما برای اطمینان، حالت آرایه‌ای قدیمی و همچنین نام‌های احتمالاً متفاوت در فریمورهای دیگر هم پشتیبان دارد
+    // اما برای اطمینان، حالت آرایه‌ای قدیمی و همچنین نام‌های احتمالاً متفاوت در فریمورهای دیگر هم پشتیبان دارد.
+    // نکته مهم: اگر کلید error_code پیدا شد ولی هیچ‌کدام از مقادیرش قابل‌تبدیل به عدد نبودند (مثلا
+    // به‌خاطر فرمت هگز)، دیگر بلافاصله با لیست خالی return نمی‌کنیم؛ به‌جای آن به روش‌های
+    // جایگزین (fallback) هم سر می‌زنیم تا کد خطا به‌اشتباه گم نشود
     private fun parseErrorCodes(root: JSONObject?): List<Int> {
         if (root == null) return emptyList()
         val msg = root.optJSONObject("Msg") ?: root
@@ -232,30 +250,31 @@ object WhatsminerClient {
         if (obj != null) {
             val keys = obj.keys()
             while (keys.hasNext()) {
-                val code = keys.next().trim().toIntOrNull()
-                if (code != null && code != 0) result.add(code)
+                parseCodeToken(keys.next())?.let { if (it != 0) result.add(it) }
             }
-            return result.toList()
         }
 
-        val arr = msg.optJSONArray("error_code")
-        if (arr != null) {
-            for (i in 0 until arr.length()) {
-                val item = arr.opt(i)
-                val code: Int? = when (item) {
-                    is JSONObject -> listOf(
-                        item.optString("error_code"),
-                        item.optString("code"),
-                        item.optString("ErrCode")
-                    ).firstOrNull { it.isNotBlank() }?.toIntOrNull()
-                    is Number -> item.toInt()
-                    is String -> item.trim().toIntOrNull()
-                    else -> null
+        if (result.isEmpty()) {
+            val arr = msg.optJSONArray("error_code")
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val item = arr.opt(i)
+                    val code: Int? = when (item) {
+                        is JSONObject -> listOf(
+                            item.optString("error_code"),
+                            item.optString("code"),
+                            item.optString("ErrCode")
+                        ).firstOrNull { it.isNotBlank() }?.let(::parseCodeToken)
+                        is Number -> item.toInt()
+                        is String -> parseCodeToken(item)
+                        else -> null
+                    }
+                    if (code != null && code != 0) result.add(code)
                 }
-                if (code != null && code != 0) result.add(code)
             }
-            return result.toList()
         }
+
+        if (result.isNotEmpty()) return result.toList()
 
         // یافت نشد؛ به‌جای فرض «بدون خطا»، به‌صورت پشتیبان دنبال هر کلیدی می‌گردیم که
         // شامل «error» باشد (برخی فریمورها ممکن است از نام دیگری به‌جای error_code استفاده کنند)
@@ -264,18 +283,18 @@ object WhatsminerClient {
             when (val v = msg.opt(k)) {
                 is JSONObject -> {
                     val ks = v.keys()
-                    while (ks.hasNext()) ks.next().trim().toIntOrNull()?.let { if (it != 0) result.add(it) }
+                    while (ks.hasNext()) parseCodeToken(ks.next())?.let { if (it != 0) result.add(it) }
                 }
                 is JSONArray -> for (i in 0 until v.length()) {
                     val code = when (val item = v.opt(i)) {
                         is Number -> item.toInt()
-                        is String -> item.trim().toIntOrNull()
+                        is String -> parseCodeToken(item)
                         else -> null
                     }
                     if (code != null && code != 0) result.add(code)
                 }
                 is Number -> if (v.toInt() != 0) result.add(v.toInt())
-                is String -> v.trim().toIntOrNull()?.let { if (it != 0) result.add(it) }
+                is String -> parseCodeToken(v)?.let { if (it != 0) result.add(it) }
                 else -> {}
             }
         }
