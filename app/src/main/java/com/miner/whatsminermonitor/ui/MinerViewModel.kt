@@ -7,6 +7,7 @@ import com.miner.whatsminermonitor.model.MinerInfo
 import com.miner.whatsminermonitor.network.NetworkScanner
 import com.miner.whatsminermonitor.network.WhatsminerClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -43,10 +44,84 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
     private val _priceSource = MutableStateFlow<String?>(null)
     val priceSource: StateFlow<String?> = _priceSource
 
+    // هشریت کل شبکه بیت‌کوین (اگزاهش بر ثانیه) - برای محاسبهٔ درآمد تخمینی؛ به‌صورت زنده گرفته می‌شود
+    private val _networkHashrateEh = MutableStateFlow<Double?>(null)
+    val networkHashrateEh: StateFlow<Double?> = _networkHashrateEh
+
+    // آخرین باری که قیمت‌ها با موفقیت به‌روزرسانی شدند
+    private val _lastPriceUpdate = MutableStateFlow<Long?>(null)
+    val lastPriceUpdate: StateFlow<Long?> = _lastPriceUpdate
+
     private val listMutex = Mutex()
 
+    companion object {
+        // فاصلهٔ رفرش خودکار قیمت‌ها و هشریت شبکه، برای «زنده» بودن مانیتورینگ
+        private const val PRICE_REFRESH_INTERVAL_MS = 60_000L
+
+        // فقط اگر هیچ‌کدام از منابع زنده (mempool.space / blockchain.info) در دسترس نبود استفاده می‌شود؛
+        // آخرین‌بار در آگوست ۲۰۲۶ به‌روزرسانی شده (هشریت واقعی شبکه معمولاً کمی بیشتر از این است)
+        private const val FALLBACK_NETWORK_HASHRATE_EH = 930.0
+    }
+
     init {
-        fetchPrices()
+        // رفرش دوره‌ای قیمت‌ها و هشریت شبکه به‌جای فقط یک‌بار موقع باز شدن برنامه؛ این یعنی
+        // مقادیر دلار/بیت‌کوین/درآمد تخمینی بدون نیاز به بستن و باز کردن برنامه به‌روز می‌مانند
+        viewModelScope.launch(Dispatchers.IO) {
+            while (true) {
+                fetchPricesOnce()
+                fetchNetworkHashrateOnce()
+                _lastPriceUpdate.value = System.currentTimeMillis()
+                delay(PRICE_REFRESH_INTERVAL_MS)
+            }
+        }
+    }
+
+    /**
+     * هشریت کل شبکه بیت‌کوین را از منابع عمومی می‌گیرد (برای محاسبهٔ دقیق‌تر درآمد تخمینی).
+     * چون این مقدار دائم در حال تغییره، هاردکد کردنش باعث می‌شه محاسبهٔ درآمد بعد از چند ماه غلط بشه؛
+     * به همین دلیل به‌جای عدد ثابت، زنده گرفته می‌شود (و هر ۶۰ ثانیه هم رفرش می‌شود)
+     */
+    private fun fetchNetworkHashrateOnce() {
+        if (tryNetworkHashrateMempool()) return
+        if (tryNetworkHashrateBlockchainInfo()) return
+        // اگر هر دو منبع در دسترس نبودند، مقدار قبلی (در صورت وجود) نگه داشته می‌شود؛
+        // فقط اگر تا حالا هیچ مقداری نگرفتیم، از یک تخمین ثابت به‌عنوان آخرین راه‌حل استفاده می‌شود
+        if (_networkHashrateEh.value == null) {
+            _networkHashrateEh.value = FALLBACK_NETWORK_HASHRATE_EH
+        }
+    }
+
+    private fun tryNetworkHashrateMempool(): Boolean = try {
+        val conn = URL("https://mempool.space/api/v1/mining/hashrate/3d").openConnection() as HttpURLConnection
+        conn.apply {
+            requestMethod = "GET"
+            connectTimeout = 5000
+            readTimeout = 5000
+        }
+        val json = JSONObject(conn.inputStream.bufferedReader().readText())
+        val hashesPerSecond = json.optDouble("currentHashrate")
+        if (hashesPerSecond > 0) {
+            _networkHashrateEh.value = hashesPerSecond / 1e18  // H/s -> EH/s
+            true
+        } else false
+    } catch (e: Exception) {
+        false
+    }
+
+    private fun tryNetworkHashrateBlockchainInfo(): Boolean = try {
+        val conn = URL("https://blockchain.info/q/hashrate").openConnection() as HttpURLConnection
+        conn.apply {
+            requestMethod = "GET"
+            connectTimeout = 5000
+            readTimeout = 5000
+        }
+        val ghs = conn.inputStream.bufferedReader().readText().trim().toDoubleOrNull()
+        if (ghs != null && ghs > 0) {
+            _networkHashrateEh.value = ghs / 1e9  // GH/s -> EH/s
+            true
+        } else false
+    } catch (e: Exception) {
+        false
     }
 
     /**
@@ -54,31 +129,15 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
      * 1. Nobitex (بهترین منبع برای قیمت ریال ایران - BTC/RLS و USDT/RLS)
      * 2. Wallex (صرافی ایرانی دیگر)
      * 3. Binance USDT قیمت + نرخ تخمینی بازار آزاد
+     * 4. CoinGecko
+     * این تابع به‌صورت مستقیم (نه با launch جدید) فراخوانی می‌شود چون همیشه از داخل حلقهٔ رفرش
+     * دوره‌ای که خودش روی Dispatchers.IO اجرا می‌شود صدا زده می‌شود
      */
-    private fun fetchPrices() {
-        viewModelScope.launch(Dispatchers.IO) {
-            var success = false
-
-            // ===== روش ۱: Nobitex - دقیق‌ترین قیمت بازار ایران =====
-            if (!success) {
-                success = tryNobitex()
-            }
-
-            // ===== روش ۲: Wallex =====
-            if (!success) {
-                success = tryWallex()
-            }
-
-            // ===== روش ۳: Binance + تخمین نرخ دلار =====
-            if (!success) {
-                success = tryBinanceWithEstimate()
-            }
-
-            // ===== روش ۴: CoinGecko =====
-            if (!success) {
-                tryCoinGecko()
-            }
-        }
+    private fun fetchPricesOnce() {
+        var success = tryNobitex()
+        if (!success) success = tryWallex()
+        if (!success) success = tryBinanceWithEstimate()
+        if (!success) tryCoinGecko()
     }
 
     /**
@@ -247,7 +306,11 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
         _btcPriceToman.value = null
         _btcPriceUsdt.value = null
         _usdToToman.value = null
-        fetchPrices()
+        viewModelScope.launch(Dispatchers.IO) {
+            fetchPricesOnce()
+            fetchNetworkHashrateOnce()
+            _lastPriceUpdate.value = System.currentTimeMillis()
+        }
     }
 
     fun startScan() {

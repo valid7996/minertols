@@ -30,8 +30,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.foundation.Image
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -109,11 +111,14 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
     val isScanning by viewModel.isScanning.collectAsState()
     val status by viewModel.statusMessage.collectAsState()
     val btcPriceUsdt by viewModel.btcPriceUsdt.collectAsState()
+    val networkHashrateEh by viewModel.networkHashrateEh.collectAsState()
+    val lastPriceUpdate by viewModel.lastPriceUpdate.collectAsState()
 
     val reachableMiners = miners.filter { it.isReachable }
     val totalThs = reachableMiners.sumOf { it.ghsAverageThs ?: it.totalHashrateThs ?: 0.0 }
+    val networkEh = networkHashrateEh ?: 930.0
     val totalDailyUsdt = btcPriceUsdt?.let { price ->
-        reachableMiners.sumOf { it.estimatedDailyBtc() * price }
+        reachableMiners.sumOf { it.estimatedDailyBtc(networkEh) * price }
     }
 
     Scaffold(
@@ -155,6 +160,19 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
             )
 
+            lastPriceUpdate?.let { updatedAt ->
+                val timeText = remember(updatedAt) {
+                    java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(updatedAt))
+                }
+                Text(
+                    "قیمت دلار/بیت‌کوین زنده است — آخرین به‌روزرسانی: $timeText",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
+                )
+            }
+
             if (miners.isEmpty() && !isScanning) {
                 EmptyState()
             } else {
@@ -163,7 +181,7 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(miners, key = { it.ip }) { miner ->
-                        MinerListItem(miner = miner, btcPriceUsdt = btcPriceUsdt, onOpen = { onOpenDetail(miner.ip) })
+                        MinerListItem(miner = miner, btcPriceUsdt = btcPriceUsdt, networkHashrateEh = networkEh, onOpen = { onOpenDetail(miner.ip) })
                     }
                     item { Spacer(modifier = Modifier.height(72.dp)) }
                 }
@@ -177,7 +195,7 @@ fun EmptyState() {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(
-                Icons.Filled.Router,
+                painter = painterResource(id = R.drawable.ic_wifi_wait),
                 contentDescription = null,
                 modifier = Modifier.size(56.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
@@ -378,77 +396,24 @@ fun SpeedGauge(valueThs: Double, modifier: Modifier = Modifier) {
 }
 
 /**
- * آیکون گرافیکی پشت دستگاه ماینر (فن بزرگ + محفظه بالا) شبیه عکس مرجع
+ * آیکون گرافیکی دستگاه ماینر - از تصویر miner-device.svg که کاربر ارسال کرد
  */
 @Composable
 fun MinerDeviceIcon(modifier: Modifier = Modifier, tint: Color = Color(0xFF3A3A3A)) {
-    Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-        val bodyTop = h * 0.16f
-
-        // بدنه اصلی (مربعی) با فن
-        drawRoundRect(
-            color = Color(0xFFEDEDED),
-            topLeft = Offset(0f, bodyTop),
-            size = Size(w, h - bodyTop),
-            cornerRadius = androidx.compose.ui.geometry.CornerRadius(w * 0.06f, w * 0.06f),
-            style = Stroke(width = w * 0.02f)
-        )
-        val fanCenter = Offset(w / 2f, bodyTop + (h - bodyTop) / 2f)
-        val fanRadius = (h - bodyTop) * 0.42f
-        drawCircle(color = tint, radius = fanRadius, center = fanCenter, style = Stroke(width = w * 0.018f))
-        drawCircle(color = tint, radius = fanRadius * 0.62f, center = fanCenter, style = Stroke(width = w * 0.012f))
-        // پره‌های فن (خطوط شعاعی)
-        for (i in 0 until 8) {
-            val angle = Math.toRadians((i * 45).toDouble())
-            val start = Offset(
-                fanCenter.x + (fanRadius * 0.15f * cos(angle)).toFloat(),
-                fanCenter.y + (fanRadius * 0.15f * sin(angle)).toFloat()
-            )
-            val end = Offset(
-                fanCenter.x + (fanRadius * cos(angle)).toFloat(),
-                fanCenter.y + (fanRadius * sin(angle)).toFloat()
-            )
-            drawLine(color = tint, start = start, end = end, strokeWidth = w * 0.012f)
-        }
-        // پیچ‌های چهارگوشه
-        val screwR = w * 0.03f
-        val margin = w * 0.08f
-        listOf(
-            Offset(margin, bodyTop + margin),
-            Offset(w - margin, bodyTop + margin),
-            Offset(margin, h - margin),
-            Offset(w - margin, h - margin)
-        ).forEach { drawCircle(color = tint, radius = screwR, center = it) }
-
-        // محفظه بالایی (سوکت برق + پورت‌ها)
-        drawRoundRect(
-            color = Color(0xFFDADADA),
-            topLeft = Offset(w * 0.08f, 0f),
-            size = Size(w * 0.84f, bodyTop),
-            cornerRadius = androidx.compose.ui.geometry.CornerRadius(w * 0.03f, w * 0.03f),
-            style = Stroke(width = w * 0.015f)
-        )
-        drawRoundRect(
-            color = tint,
-            topLeft = Offset(w * 0.14f, bodyTop * 0.2f),
-            size = Size(w * 0.22f, bodyTop * 0.6f),
-            cornerRadius = androidx.compose.ui.geometry.CornerRadius(2f, 2f),
-            style = Stroke(width = w * 0.012f)
-        )
-        drawCircle(color = tint, radius = w * 0.015f, center = Offset(w * 0.5f, bodyTop * 0.5f))
-        drawCircle(color = tint, radius = w * 0.015f, center = Offset(w * 0.58f, bodyTop * 0.5f))
-        drawCircle(color = tint, radius = w * 0.015f, center = Offset(w * 0.66f, bodyTop * 0.5f))
-    }
+    Icon(
+        painter = painterResource(id = R.drawable.ic_miner_device),
+        contentDescription = null,
+        tint = tint,
+        modifier = modifier
+    )
 }
 
 // ==================================================================================
 // آیتم فشرده لیست ماینرها روی صفحه اصلی + دکمه باز کردن جزئیات
 // ==================================================================================
 @Composable
-fun MinerListItem(miner: MinerInfo, btcPriceUsdt: Double?, onOpen: () -> Unit) {
-    val dailyUsdt = btcPriceUsdt?.let { miner.estimatedDailyBtc() * it }
+fun MinerListItem(miner: MinerInfo, btcPriceUsdt: Double?, networkHashrateEh: Double = 930.0, onOpen: () -> Unit) {
+    val dailyUsdt = btcPriceUsdt?.let { miner.estimatedDailyBtc(networkHashrateEh) * it }
 
     Column {
         Text(
@@ -573,6 +538,7 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
     val btcPriceToman by viewModel.btcPriceToman.collectAsState()
     val usdToToman by viewModel.usdToToman.collectAsState()
     val priceSource by viewModel.priceSource.collectAsState()
+    val networkHashrateEh by viewModel.networkHashrateEh.collectAsState()
     val miner = miners.firstOrNull { it.ip == ip }
 
     val clipboard = LocalClipboardManager.current
@@ -764,8 +730,16 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                     value = miner.averageTemperature?.let { "%.1f°C".format(it) } ?: "—",
                     color = tempColor(miner.averageTemperature)
                 )
-                StatChip(label = "فن جلو (ورودی)", value = miner.fanSpeedIn?.let { "$it RPM" } ?: "—")
-                StatChip(label = "فن عقب (خروجی)", value = miner.fanSpeedOut?.let { "$it RPM" } ?: "—")
+                StatChip(
+                    label = "فن جلو (ورودی)",
+                    value = miner.fanSpeedIn?.let { "$it RPM" } ?: "—",
+                    icon = R.drawable.ic_fan_speed
+                )
+                StatChip(
+                    label = "فن عقب (خروجی)",
+                    value = miner.fanSpeedOut?.let { "$it RPM" } ?: "—",
+                    icon = R.drawable.ic_fan_speed
+                )
             }
 
             Spacer(modifier = Modifier.height(14.dp))
@@ -818,7 +792,7 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
             Spacer(modifier = Modifier.height(14.dp))
 
             // ===== وضعیت سلامت / خطاهای فعال =====
-            ErrorsSection(miner)
+            ErrorsSection(miner, onRetryCheck = { viewModel.refreshMiner(miner.ip) })
 
             Spacer(modifier = Modifier.height(14.dp))
 
@@ -827,7 +801,8 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                 btcPriceUsdt = btcPriceUsdt,
                 btcPriceToman = btcPriceToman,
                 usdToToman = usdToToman,
-                priceSource = priceSource
+                priceSource = priceSource,
+                networkHashrateEh = networkHashrateEh ?: 930.0
             )
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -973,10 +948,52 @@ fun DetailField(label: String, value: String, modifier: Modifier = Modifier) {
  * به همراه علت و راه‌حل هرکدام نمایش داده می‌شود
  */
 @Composable
-fun ErrorsSection(miner: MinerInfo) {
+fun ErrorsSection(miner: MinerInfo, onRetryCheck: (() -> Unit)? = null) {
     if (!miner.isReachable) return
 
-    if (miner.errorCodes.isEmpty()) {
+    if (miner.errorCodes.isNotEmpty()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                painter = painterResource(id = R.drawable.ic_notif_bell),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                "خطاهای فعال",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            miner.errorDetails.forEach { ErrorDetailCard(it) }
+        }
+    } else if (miner.errorCheckFailed) {
+        // این حالت با «سالم» فرق دارد: یعنی نتوانستیم از دستگاه کد خطا بگیریم، نه اینکه واقعا خطایی نیست
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFFF9800).copy(alpha = 0.10f))
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Filled.HelpOutline, contentDescription = null, tint = Color(0xFFFF9800))
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("بررسی کد خطا ناموفق بود", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = Color(0xFFFF9800))
+                    Text("دستگاه به درخواست کد خطا پاسخ نداد؛ این به معنی سالم بودن قطعی نیست", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (onRetryCheck != null) {
+                    IconButton(onClick = onRetryCheck) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "تلاش دوباره", tint = Color(0xFFFF9800))
+                    }
+                }
+            }
+        }
+    } else {
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF4CAF50).copy(alpha = 0.10f))
         ) {
@@ -991,17 +1008,6 @@ fun ErrorsSection(miner: MinerInfo) {
                     Text("هیچ کد خطای فعالی گزارش نشده است", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-        }
-    } else {
-        Text(
-            "⚠️ خطاهای فعال",
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.error
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            miner.errorDetails.forEach { ErrorDetailCard(it) }
         }
     }
 }
@@ -1042,9 +1048,10 @@ fun IncomeSection(
     btcPriceUsdt: Double?,
     btcPriceToman: Long?,
     usdToToman: Long?,
-    priceSource: String?
+    priceSource: String?,
+    networkHashrateEh: Double = 930.0
 ) {
-    val dailyBtc = miner.estimatedDailyBtc()
+    val dailyBtc = miner.estimatedDailyBtc(networkHashrateEh)
     val monthlyBtc = dailyBtc * 30
 
     val dailyUsdt = btcPriceUsdt?.let { dailyBtc * it }
@@ -1144,6 +1151,14 @@ fun IncomeRow(label: String, value: String, color: Color) {
 
 @Composable
 fun HashboardRow(board: HashboardInfo) {
+    // تصاویر هش‌برد که کاربر ارسال کرد فقط برای شماره‌های ۱ تا ۳ برچسب دارند؛ اگر دستگاهی بیشتر از
+    // ۳ هش‌برد داشت (مدل‌های بزرگ‌تر)، تصاویر به‌صورت چرخشی دوباره استفاده می‌شوند
+    val displayNumber = (board.id % 3) + 1
+    val imageRes = when (displayNumber) {
+        1 -> R.drawable.hashboard_1
+        2 -> R.drawable.hashboard_2
+        else -> R.drawable.hashboard_3
+    }
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
@@ -1153,7 +1168,15 @@ fun HashboardRow(board: HashboardInfo) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("برد ${board.id}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Image(
+                    painter = painterResource(id = imageRes),
+                    contentDescription = null,
+                    modifier = Modifier.size(36.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("برد $displayNumber", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+            }
             Text(board.hashrateGhs?.let { "%.1f GH/s".format(it) } ?: "—", style = MaterialTheme.typography.bodySmall, color = Color(0xFF2196F3))
             Text(board.temperaturePcb?.let { "%.0f°C".format(it) } ?: "—", style = MaterialTheme.typography.bodySmall, color = tempColor(board.temperaturePcb))
             Text(board.effectiveChips?.let { "$it چیپ" } ?: "—", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1165,8 +1188,17 @@ fun HashboardRow(board: HashboardInfo) {
 }
 
 @Composable
-fun StatChip(label: String, value: String, color: Color = Color.Unspecified) {
+fun StatChip(label: String, value: String, color: Color = Color.Unspecified, icon: Int? = null) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        if (icon != null) {
+            Icon(
+                painter = painterResource(id = icon),
+                contentDescription = null,
+                tint = if (color != Color.Unspecified) color else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+        }
         Text(
             value,
             style = MaterialTheme.typography.bodyMedium,

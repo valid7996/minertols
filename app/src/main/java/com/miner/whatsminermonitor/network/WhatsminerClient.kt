@@ -1,9 +1,11 @@
 package com.miner.whatsminermonitor.network
 
+import android.util.Base64
 import com.miner.whatsminermonitor.model.HashboardInfo
 import com.miner.whatsminermonitor.model.MinerInfo
 import com.miner.whatsminermonitor.model.PoolEntry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -12,6 +14,8 @@ import java.io.InputStreamReader
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.MessageDigest
+import javax.crypto.Cipher
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * نتیجه یک دستور ممتاز (privileged) مثل ریبوت یا تغییر پول
@@ -72,6 +76,25 @@ object WhatsminerClient {
         }
     }
 
+    // برخی دستگاه‌ها وقتی چند اتصال TCP پشت‌سرهم و سریع باز می‌شود (مثلا در انتهای چرخهٔ خواندن
+    // اطلاعات یک دستگاه) گاهی یکی از دستورها را جواب نمی‌دهند؛ برای دستورهای حساس (مثل کد خطا)
+    // در صورت شکست اولیه، یک تلاش دوم بعد از کمی مکث انجام می‌شود
+    private suspend fun sendRawCommandWithRetry(
+        ip: String,
+        command: String,
+        retries: Int = 1,
+        delayMs: Long = 350
+    ): String? {
+        var result = sendRawCommand(ip, command)
+        var attemptsLeft = retries
+        while (result == null && attemptsLeft > 0) {
+            delay(delayMs)
+            result = sendRawCommand(ip, command)
+            attemptsLeft--
+        }
+        return result
+    }
+
     // ================= دستورهای خواندنی (Readable API) =================
 
     suspend fun fetchSummary(ip: String): JSONObject? {
@@ -113,9 +136,11 @@ object WhatsminerClient {
         return runCatching { JSONObject(raw) }.getOrNull()
     }
 
-    // فهرست کدهای خطای فعال دستگاه
+    // فهرست کدهای خطای فعال دستگاه؛ چون این دستور معمولا آخرین دستور در چرخهٔ خواندن اطلاعات یک
+    // دستگاه است (بعد از ۷ اتصال دیگر) و دستگاه‌های Whatsminer گاهی به اتصال‌های پشت‌سرهم سریع
+    // به‌کندی/ناپایدار پاسخ می‌دهند، در صورت شکست یک‌بار دیگر با کمی مکث تلاش می‌شود
     suspend fun fetchErrorCode(ip: String): JSONObject? {
-        val raw = sendRawCommand(ip, """{"cmd":"get_error_code"}""") ?: return null
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_error_code"}""", retries = 1) ?: return null
         return runCatching { JSONObject(raw) }.getOrNull()
     }
 
@@ -126,20 +151,33 @@ object WhatsminerClient {
         }
 
         val summaryObj = firstArrayObject(summaryRoot, "SUMMARY")
+        // بین اتصال‌های پشت‌سرهم TCP یک مکث کوتاه گذاشته می‌شود؛ چون دستگاه Whatsminer روی یک
+        // پورت با ظرفیت محدود پاسخ می‌دهد، ارسال پشت‌سرهم و بدون فاصلهٔ ۸ دستور جدا می‌تواند باعث
+        // شود آخرین دستورها (از جمله get_error_code) گاهی بی‌پاسخ بمانند
+        delay(60)
         val devsRoot = fetchDevs(ip)
         val devsArray = devsRoot?.optJSONArray("DEVS")
+        delay(60)
         val versionRoot = fetchVersion(ip)
         val versionMsg = versionRoot?.optJSONObject("Msg")
+        delay(60)
         val devDetailsRoot = fetchDevDetails(ip)
         val devDetailsObj = firstArrayObject(devDetailsRoot, "DEVDETAILS")
+        delay(60)
         val psuRoot = fetchPsu(ip)
         val psuMsg = psuRoot?.optJSONObject("Msg")
+        delay(60)
         val minerInfoRoot = fetchMinerInfo(ip)
         val minerInfoMsg = minerInfoRoot?.optJSONObject("Msg")
+        delay(60)
         val poolsRoot = fetchPools(ip)
         val poolObj = firstArrayObject(poolsRoot, "POOLS")
+        delay(60)
         val errorRoot = fetchErrorCode(ip)
         val errorCodes = parseErrorCodes(errorRoot)
+        // اگر errorRoot عملا null باشد یعنی دستور get_error_code اصلا پاسخ نگرفته (نه اینکه دستگاه
+        // واقعا خطایی نداشته)؛ این تفاوت را جدا نگه می‌داریم تا در UI به‌جای «سالم» به‌درستی «قابل بررسی نبود» نشان داده شود
+        val errorCheckFailed = errorRoot == null
 
         val hashboards = parseHashboards(devsArray)
         val avgTemp = hashboards.mapNotNull { it.temperaturePcb ?: it.temperatureChip }
@@ -177,13 +215,14 @@ object WhatsminerClient {
             powerSupplyModel = findString(psuMsg, listOf("name", "model")),
             poolWorkerName = findString(poolObj, listOf("User")),
             poolUrl = findString(poolObj, listOf("URL")),
-            errorCodes = errorCodes
+            errorCodes = errorCodes,
+            errorCheckFailed = errorCheckFailed
         )
     }
 
     // پارس کردن پاسخ get_error_code به فهرستی از کدهای عددی خطای فعال
     // طبق مستندات رسمی، ساختار پاسخ یک شیء است: {"error_code": {"<code>": "<timestamp>", ...}}
-    // اما برای اطمینان، حالت آرایه‌ای قدیمی هم به‌عنوان پشتیبان پارس می‌شود
+    // اما برای اطمینان، حالت آرایه‌ای قدیمی و همچنین نام‌های احتمالاً متفاوت در فریمورهای دیگر هم پشتیبان دارد
     private fun parseErrorCodes(root: JSONObject?): List<Int> {
         if (root == null) return emptyList()
         val msg = root.optJSONObject("Msg") ?: root
@@ -199,20 +238,46 @@ object WhatsminerClient {
             return result.toList()
         }
 
-        val arr = msg.optJSONArray("error_code") ?: return emptyList()
-        for (i in 0 until arr.length()) {
-            val item = arr.opt(i)
-            val code: Int? = when (item) {
-                is JSONObject -> listOf(
-                    item.optString("error_code"),
-                    item.optString("code"),
-                    item.optString("ErrCode")
-                ).firstOrNull { it.isNotBlank() }?.toIntOrNull()
-                is Number -> item.toInt()
-                is String -> item.trim().toIntOrNull()
-                else -> null
+        val arr = msg.optJSONArray("error_code")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val item = arr.opt(i)
+                val code: Int? = when (item) {
+                    is JSONObject -> listOf(
+                        item.optString("error_code"),
+                        item.optString("code"),
+                        item.optString("ErrCode")
+                    ).firstOrNull { it.isNotBlank() }?.toIntOrNull()
+                    is Number -> item.toInt()
+                    is String -> item.trim().toIntOrNull()
+                    else -> null
+                }
+                if (code != null && code != 0) result.add(code)
             }
-            if (code != null && code != 0) result.add(code)
+            return result.toList()
+        }
+
+        // یافت نشد؛ به‌جای فرض «بدون خطا»، به‌صورت پشتیبان دنبال هر کلیدی می‌گردیم که
+        // شامل «error» باشد (برخی فریمورها ممکن است از نام دیگری به‌جای error_code استفاده کنند)
+        val fallbackKeys = msg.keys().asSequence().filter { it.contains("error", ignoreCase = true) }
+        for (k in fallbackKeys) {
+            when (val v = msg.opt(k)) {
+                is JSONObject -> {
+                    val ks = v.keys()
+                    while (ks.hasNext()) ks.next().trim().toIntOrNull()?.let { if (it != 0) result.add(it) }
+                }
+                is JSONArray -> for (i in 0 until v.length()) {
+                    val code = when (val item = v.opt(i)) {
+                        is Number -> item.toInt()
+                        is String -> item.trim().toIntOrNull()
+                        else -> null
+                    }
+                    if (code != null && code != 0) result.add(code)
+                }
+                is Number -> if (v.toInt() != 0) result.add(v.toInt())
+                is String -> v.trim().toIntOrNull()?.let { if (it != 0) result.add(it) }
+                else -> {}
+            }
         }
         return result.toList()
     }
@@ -280,21 +345,140 @@ object WhatsminerClient {
     }
 
     // ================= دستورهای ممتاز (Writable API) =================
-    // طبق مستندات رسمی MicroBT:
-    // 1) {"cmd":"get_token"} -> {"Msg":{"time","salt","newsalt"}}
-    // 2) key  = md5(salt + password)
-    //    sign = md5(newsalt + key + آخرین ۴ کاراکتر time)
-    // 3) دستور نهایی با فیلد "token": sign ارسال می‌شود
+    // طبق مستندات رسمی MicroBT (Whatsminer API v2.0.5) و پیاده‌سازی‌های واقعی شناخته‌شده
+    // (کتابخانه‌های whatsminer-api و pyasic که روی دستگاه‌های واقعی استفاده می‌شوند):
+    //
+    // 1) {"cmd":"get_token"} -> {"Msg":{"time":"...","salt":"...","newsalt":"..."}}
+    // 2) key  = crypt(admin_password, salt)   -- الگوریتم استاندارد یونیکس md5crypt (فرمت $1$salt$hash)
+    //                                             معادل دستور شل: openssl passwd -1 -salt $salt "$password"
+    //                                             (این یک هش MD5 ساده نیست؛ ۱۰۰۰ دور تکرار دارد)
+    // 3) sign = crypt(key + time, newsalt)    -- با همان الگوریتم، رشتهٔ بعد از سومین $ در خروجی
+    // 4) کلید AES = SHA-256(key) به‌صورت ۳۲ بایت خام (نه رشتهٔ hex)
+    // 5) دستور نهایی (JSON شامل "token": sign) با null بایت تا مضربی از ۱۶ پد شده، با
+    //    AES-256-ECB رمزنگاری و به‌صورت {"enc":1,"data":"<base64>"} ارسال می‌شود
+    // 6) پاسخ هم رمزنگاری‌شده برمی‌گردد: {"enc":"<base64>"} که باید با همان کلید رمزگشایی شود
+    //
+    // نسخهٔ قبلی این فایل به اشتباه از یک MD5 ساده (بدون salt واقعی/تکرار) استفاده می‌کرد و دستور را
+    // بدون رمزنگاری AES ارسال می‌کرد؛ در نتیجه صرف‌نظر از درستیِ رمز واقعی دستگاه، امضا هیچ‌وقت با
+    // چیزی که دستگاه انتظار داشت مطابقت نمی‌کرد و همیشه خطای «رمز اشتباه» (کد ۴۵) برمی‌گشت.
 
-    private fun md5Hex(input: String): String {
-        val digest = MessageDigest.getInstance("MD5").digest(input.toByteArray(Charsets.UTF_8))
-        val sb = StringBuilder(digest.size * 2)
-        for (b in digest) sb.append(String.format("%02x", b))
+    private const val ITOA64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+    private fun md5(vararg parts: ByteArray): ByteArray {
+        val md = MessageDigest.getInstance("MD5")
+        for (p in parts) md.update(p)
+        return md.digest()
+    }
+
+    private fun to64(valueIn: Long, length: Int): String {
+        var value = valueIn
+        val sb = StringBuilder()
+        repeat(length) {
+            sb.append(ITOA64[(value and 0x3F).toInt()])
+            value = value ushr 6
+        }
         return sb.toString()
     }
 
+    /**
+     * پیاده‌سازی الگوریتم استاندارد یونیکس MD5-crypt (فرمت $1$salt$hash) که Whatsminer برای
+     * تولید "key" و "sign" استفاده می‌کند. با passlib (پایتون) خط‌به‌خط تست و تأیید شده است.
+     */
+    private fun md5Crypt(password: String, saltIn: String): String {
+        val salt = saltIn.substringBefore('$').take(8)
+        val pw = password.toByteArray(Charsets.UTF_8)
+        val saltBytes = salt.toByteArray(Charsets.UTF_8)
+
+        var final = md5(pw, saltBytes, pw)
+
+        val md = MessageDigest.getInstance("MD5")
+        md.update(pw)
+        md.update("$1$".toByteArray(Charsets.UTF_8))
+        md.update(saltBytes)
+
+        var pl = pw.size
+        while (pl > 0) {
+            val take = minOf(pl, 16)
+            md.update(final, 0, take)
+            pl -= 16
+        }
+
+        var i = pw.size
+        while (i != 0) {
+            if (i and 1 != 0) md.update(byteArrayOf(0)) else md.update(pw, 0, 1)
+            i = i shr 1
+        }
+
+        final = md.digest()
+
+        for (round in 0 until 1000) {
+            val ctx1 = MessageDigest.getInstance("MD5")
+            if (round and 1 != 0) ctx1.update(pw) else ctx1.update(final)
+            if (round % 3 != 0) ctx1.update(saltBytes)
+            if (round % 7 != 0) ctx1.update(pw)
+            if (round and 1 != 0) ctx1.update(final) else ctx1.update(pw)
+            final = ctx1.digest()
+        }
+
+        fun b(idx: Int): Long = (final[idx].toLong() and 0xFFL)
+
+        val out = StringBuilder()
+        out.append(to64((b(0) shl 16) or (b(6) shl 8) or b(12), 4))
+        out.append(to64((b(1) shl 16) or (b(7) shl 8) or b(13), 4))
+        out.append(to64((b(2) shl 16) or (b(8) shl 8) or b(14), 4))
+        out.append(to64((b(3) shl 16) or (b(9) shl 8) or b(15), 4))
+        out.append(to64((b(4) shl 16) or (b(10) shl 8) or b(5), 4))
+        out.append(to64(b(11), 2))
+
+        return "$1$$salt$$out"
+    }
+
+    /** فقط بخش hash را از خروجی md5Crypt (فرمت $1$salt$hash) برمی‌گرداند */
+    private fun md5CryptHashPart(password: String, salt: String): String =
+        md5Crypt(password, salt).split("$").getOrElse(3) { "" }
+
+    private fun sha256Hex(input: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
+        val sb = StringBuilder(digest.size * 2)
+        for (byte in digest) sb.append(String.format("%02x", byte))
+        return sb.toString()
+    }
+
+    private fun hexToBytes(hex: String): ByteArray {
+        val out = ByteArray(hex.length / 2)
+        for (idx in out.indices) {
+            out[idx] = ((Character.digit(hex[idx * 2], 16) shl 4) + Character.digit(hex[idx * 2 + 1], 16)).toByte()
+        }
+        return out
+    }
+
+    private fun padTo16(input: ByteArray): ByteArray {
+        val remainder = input.size % 16
+        if (remainder == 0) return input
+        val padded = ByteArray(input.size + (16 - remainder))
+        System.arraycopy(input, 0, padded, 0, input.size)
+        return padded
+    }
+
+    private fun aesKeyFromPasswordHash(passwordHashPart: String): ByteArray =
+        hexToBytes(sha256Hex(passwordHashPart))
+
+    private fun aesEncryptEcb(plainJson: String, aesKey: ByteArray): String {
+        val cipher = Cipher.getInstance("AES/ECB/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(aesKey, "AES"))
+        val encrypted = cipher.doFinal(padTo16(plainJson.toByteArray(Charsets.UTF_8)))
+        return Base64.encodeToString(encrypted, Base64.NO_WRAP)
+    }
+
+    private fun aesDecryptEcb(base64Cipher: String, aesKey: ByteArray): String {
+        val cipher = Cipher.getInstance("AES/ECB/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(aesKey, "AES"))
+        val decrypted = cipher.doFinal(Base64.decode(base64Cipher, Base64.NO_WRAP))
+        return decrypted.toString(Charsets.UTF_8).trimEnd('\u0000')
+    }
+
     private suspend fun getToken(ip: String): TokenInfo? {
-        val raw = sendRawCommand(ip, """{"cmd":"get_token"}""") ?: return null
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_token"}""", retries = 1) ?: return null
         val json = runCatching { JSONObject(raw) }.getOrNull() ?: return null
         val msg = json.optJSONObject("Msg") ?: return null
         val time = msg.optString("time")
@@ -304,18 +488,12 @@ object WhatsminerClient {
         return TokenInfo(time, salt, newSalt)
     }
 
-    private fun computeSign(password: String, time: String, salt: String, newSalt: String): String {
-        val key = md5Hex(salt + password)
-        val timeSuffix = if (time.length >= 4) time.takeLast(4) else time
-        return md5Hex(newSalt + key + timeSuffix)
-    }
-
     private fun jsonEscape(value: String): String =
         value.replace("\\", "\\\\").replace("\"", "\\\"")
 
     /**
-     * یک دستور ممتاز را با گرفتن توکن تازه و امضا کردن آن با رمز عبور دستگاه اجرا می‌کند.
-     * buildCommand باید JSON کامل شامل فیلد "token" را بسازد.
+     * یک دستور ممتاز را با گرفتن توکن تازه، امضا کردن با رمز عبور دستگاه، و رمزنگاری AES-256-ECB
+     * کل دستور (طبق پروتکل رسمی) اجرا می‌کند. buildCommand باید JSON کامل شامل فیلد "token" را بسازد.
      */
     private suspend fun sendPrivileged(
         ip: String,
@@ -324,25 +502,41 @@ object WhatsminerClient {
     ): PrivilegedResult {
         val token = getToken(ip)
             ?: return PrivilegedResult(false, "اتصال برای دریافت توکن از دستگاه ناموفق بود")
-        val sign = computeSign(password, token.time, token.salt, token.newSalt)
+
+        val keyHash = md5CryptHashPart(password, token.salt)
+        val sign = md5CryptHashPart(keyHash + token.time, token.newSalt)
+        val aesKey = aesKeyFromPasswordHash(keyHash)
+
         val commandJson = buildCommand(sign)
-        val raw = sendRawCommand(ip, commandJson)
+        val encryptedPayload = """{"enc":1,"data":"${aesEncryptEcb(commandJson, aesKey)}"}"""
+
+        val raw = sendRawCommand(ip, encryptedPayload)
             ?: return PrivilegedResult(false, "پاسخی از دستگاه دریافت نشد")
-        val json = runCatching { JSONObject(raw) }.getOrNull()
+        val rawJson = runCatching { JSONObject(raw) }.getOrNull()
             ?: return PrivilegedResult(false, "پاسخ نامعتبر از دستگاه")
 
-        val code = json.optInt("Code", -1)
-        val status = json.optString("STATUS")
+        // پاسخ طبق پروتکل رسمی رمزنگاری‌شده برمی‌گردد: {"enc":"<base64>"}
+        // برای اطمینان، اگر فریمورِ خاصی پاسخ را رمزنگاری‌نشده برگرداند هم پشتیبانی می‌شود
+        val encField = rawJson.opt("enc")
+        val resultJson = if (encField is String && encField.isNotBlank()) {
+            val decrypted = runCatching { aesDecryptEcb(encField, aesKey) }.getOrNull()
+            decrypted?.let { runCatching { JSONObject(it) }.getOrNull() } ?: rawJson
+        } else {
+            rawJson
+        }
+
+        val code = resultJson.optInt("Code", -1)
+        val status = resultJson.optString("STATUS")
         return when {
             code == 45 -> PrivilegedResult(false, "رمز عبور اشتباه است", wrongPassword = true)
             code == 131 || status.equals("S", ignoreCase = true) ->
                 PrivilegedResult(true, "عملیات با موفقیت انجام شد")
-            else -> PrivilegedResult(false, json.optString("Msg").ifBlank { "خطای نامشخص از دستگاه (کد $code)" })
+            else -> PrivilegedResult(false, resultJson.optString("Msg").ifBlank { "خطای نامشخص از دستگاه (کد $code)" })
         }
     }
 
     suspend fun reboot(ip: String, password: String): PrivilegedResult =
-        sendPrivileged(ip, password) { token -> """{"token":"$token","cmd":"reboot"}""" }
+        sendPrivileged(ip, password) { token -> """{"cmd":"reboot","token":"$token"}""" }
 
     /**
      * تعویض پول‌های ماینینگ دستگاه (حداکثر ۳ پول). عملیات بلافاصله پس از اجرا اعمال می‌شود.
@@ -353,14 +547,14 @@ object WhatsminerClient {
 
         return sendPrivileged(ip, password) { token ->
             val sb = StringBuilder()
-            sb.append("""{"token":"$token","cmd":"update_pools"""")
+            sb.append("""{"cmd":"update_pools"""")
             padded.forEachIndexed { idx, pool ->
                 val n = idx + 1
                 sb.append(""","pool$n":"${jsonEscape(pool.url)}"""")
                 sb.append(""","worker$n":"${jsonEscape(pool.worker)}"""")
                 sb.append(""","passwd$n":"${jsonEscape(pool.pass)}"""")
             }
-            sb.append("}")
+            sb.append(""","token":"$token"}""")
             sb.toString()
         }
     }

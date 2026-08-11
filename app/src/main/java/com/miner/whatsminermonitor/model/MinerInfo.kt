@@ -38,11 +38,12 @@ data class MinerInfo(
     val powerSupplyModel: String? = null,    // مدل پاور (در صورت موجود بودن)
     val poolWorkerName: String? = null,      // نام Worker تنظیم‌شده در استخر
     val poolUrl: String? = null,             // آدرس استخر متصل
-    val errorCodes: List<Int> = emptyList()  // کدهای خطای فعال دستگاه
+    val errorCodes: List<Int> = emptyList(), // کدهای خطای فعال دستگاه
+    val errorCheckFailed: Boolean = false    // true یعنی نتوانستیم از دستگاه کد خطا بگیریم (نه اینکه واقعا سالم است)
 ) {
     // آیا دستگاه سالم است (بدون کد خطای فعال)؟
     val isHealthy: Boolean
-        get() = isReachable && errorCodes.isEmpty()
+        get() = isReachable && errorCodes.isEmpty() && !errorCheckFailed
 
     val errorDetails: List<WhatsminerErrorDetail>
         get() = errorCodes.map { WhatsminerErrorCatalog.describe(it) }
@@ -65,9 +66,11 @@ data class MinerInfo(
     }
 
     // محاسبه درآمد روزانه تخمینی (BTC) بر اساس هشریت
-    // فرمول ساده‌شده: (hashrate_TH/s / network_hashrate_TH/s) * block_reward * blocks_per_day
-    // از یک ضریب تخمینی استفاده می‌کنیم که به‌صورت realtime از قیمت استخراج می‌شود
-    fun estimatedDailyBtc(networkHashrateEh: Double = 800.0): Double {
+    // فرمول: (hashrate_TH/s / network_hashrate_TH/s) * block_reward * blocks_per_day
+    // networkHashrateEh باید ترجیحاً از MinerViewModel.networkHashrateEh (که زنده از mempool.space /
+    // blockchain.info گرفته می‌شود) بیاید؛ عدد ۹۳۰ فقط یک مقدار پیش‌فرضِ آخرین‌راه‌حل است (آگوست ۲۰۲۶)
+    // و اگر برای مدت طولانی به‌روزرسانی نشود، محاسبه به‌مرور نادقیق می‌شود
+    fun estimatedDailyBtc(networkHashrateEh: Double = 930.0): Double {
         val ths = ghsAverageThs ?: totalHashrateThs ?: return 0.0
         // blocks per day ~= 144, reward = 3.125 BTC
         // income = (ths / (networkHashrateEh * 1_000_000)) * 144 * 3.125
