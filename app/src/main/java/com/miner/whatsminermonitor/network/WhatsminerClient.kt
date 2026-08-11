@@ -496,15 +496,18 @@ object WhatsminerClient {
         return decrypted.toString(Charsets.UTF_8).trimEnd('\u0000')
     }
 
-    private suspend fun getToken(ip: String): TokenInfo? {
-        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_token"}""", retries = 1) ?: return null
-        val json = runCatching { JSONObject(raw) }.getOrNull() ?: return null
-        val msg = json.optJSONObject("Msg") ?: return null
+    // نسخه تشخیصی get_token: به‌جای null ساده، متن خام پاسخ دستگاه را هم برمی‌گرداند تا در صورت
+    // شکست بشود دقیقاً دید دستگاه چه چیزی پس داده (مثلاً یک فیلد با نام دیگر یا یک ساختار متفاوت)
+    private suspend fun getTokenDebug(ip: String): Pair<TokenInfo?, String?> {
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_token"}""", retries = 1)
+            ?: return null to null
+        val json = runCatching { JSONObject(raw) }.getOrNull() ?: return null to raw
+        val msg = json.optJSONObject("Msg") ?: return null to raw
         val time = msg.optString("time")
         val salt = msg.optString("salt")
         val newSalt = msg.optString("newsalt")
-        if (time.isBlank() || salt.isBlank() || newSalt.isBlank()) return null
-        return TokenInfo(time, salt, newSalt)
+        if (time.isBlank() || salt.isBlank() || newSalt.isBlank()) return null to raw
+        return TokenInfo(time, salt, newSalt) to raw
     }
 
     private fun jsonEscape(value: String): String =
@@ -513,14 +516,21 @@ object WhatsminerClient {
     /**
      * یک دستور ممتاز را با گرفتن توکن تازه، امضا کردن با رمز عبور دستگاه، و رمزنگاری AES-256-ECB
      * کل دستور (طبق پروتکل رسمی) اجرا می‌کند. buildCommand باید JSON کامل شامل فیلد "token" را بسازد.
+     *
+     * اگر عملیات شکست بخورد، پیام خطا شامل جزئیات خام دستگاه (کد/پیام واقعی برگشتی و نسخه فریمور)
+     * هم می‌شود؛ چون این پروتکل بین نسخه‌های مختلف فریمور Whatsminer فرق می‌کند و بدون دیدن دادهٔ
+     * خام دستگاه نمی‌شود مطمئن شد مشکل از رمز اشتباه است یا از عدم تطابق نسخهٔ پروتکل
      */
     private suspend fun sendPrivileged(
         ip: String,
         password: String,
         buildCommand: (token: String) -> String
     ): PrivilegedResult {
-        val token = getToken(ip)
-            ?: return PrivilegedResult(false, "اتصال برای دریافت توکن از دستگاه ناموفق بود")
+        val (token, tokenRaw) = getTokenDebug(ip)
+        if (token == null) {
+            val hint = tokenRaw?.take(200) ?: "بدون پاسخ"
+            return PrivilegedResult(false, "دریافت توکن ناموفق بود. پاسخ خام دستگاه: $hint")
+        }
 
         val keyHash = md5CryptHashPart(password, token.salt)
         val sign = md5CryptHashPart(keyHash + token.time, token.newSalt)
@@ -530,16 +540,19 @@ object WhatsminerClient {
         val encryptedPayload = """{"enc":1,"data":"${aesEncryptEcb(commandJson, aesKey)}"}"""
 
         val raw = sendRawCommand(ip, encryptedPayload)
-            ?: return PrivilegedResult(false, "پاسخی از دستگاه دریافت نشد")
+            ?: return PrivilegedResult(false, "پاسخی از دستگاه دریافت نشد (بعد از دریافت توکن موفق)")
         val rawJson = runCatching { JSONObject(raw) }.getOrNull()
-            ?: return PrivilegedResult(false, "پاسخ نامعتبر از دستگاه")
+            ?: return PrivilegedResult(false, "پاسخ نامعتبر از دستگاه: ${raw.take(200)}")
 
         // پاسخ طبق پروتکل رسمی رمزنگاری‌شده برمی‌گردد: {"enc":"<base64>"}
         // برای اطمینان، اگر فریمورِ خاصی پاسخ را رمزنگاری‌نشده برگرداند هم پشتیبانی می‌شود
         val encField = rawJson.opt("enc")
+        var decryptFailed = false
         val resultJson = if (encField is String && encField.isNotBlank()) {
             val decrypted = runCatching { aesDecryptEcb(encField, aesKey) }.getOrNull()
-            decrypted?.let { runCatching { JSONObject(it) }.getOrNull() } ?: rawJson
+            val parsed = decrypted?.let { runCatching { JSONObject(it) }.getOrNull() }
+            if (parsed == null) decryptFailed = true
+            parsed ?: rawJson
         } else {
             rawJson
         }
@@ -547,10 +560,20 @@ object WhatsminerClient {
         val code = resultJson.optInt("Code", -1)
         val status = resultJson.optString("STATUS")
         return when {
-            code == 45 -> PrivilegedResult(false, "رمز عبور اشتباه است", wrongPassword = true)
+            code == 45 -> PrivilegedResult(
+                false,
+                if (decryptFailed)
+                    "رمز اشتباه گزارش شد، ولی رمزگشایی پاسخ هم ناموفق بود — احتمالاً نسخه پروتکل دستگاه با این کد یکی نیست (کد خام: ${raw.take(150)})"
+                else
+                    "رمز عبور اشتباه است (کد ۴۵ از دستگاه، پاسخ کامل: ${resultJson})",
+                wrongPassword = true
+            )
             code == 131 || status.equals("S", ignoreCase = true) ->
                 PrivilegedResult(true, "عملیات با موفقیت انجام شد")
-            else -> PrivilegedResult(false, resultJson.optString("Msg").ifBlank { "خطای نامشخص از دستگاه (کد $code)" })
+            else -> PrivilegedResult(
+                false,
+                "خطای دستگاه — کد: $code، پیام: ${resultJson.optString("Msg").ifBlank { "نامشخص" }}، پاسخ کامل: ${resultJson}"
+            )
         }
     }
 

@@ -547,6 +547,7 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
     var showPoolPicker by remember { mutableStateOf(false) }
     var poolPendingConfirm by remember { mutableStateOf<PoolProfile?>(null) }
     var showSetPasswordDialog by remember { mutableStateOf(false) }
+    var errorDetailDialog by remember { mutableStateOf<String?>(null) }
     var isBusy by remember { mutableStateOf(false) }
 
     suspend fun runPrivileged(action: PendingPrivilegedAction, ipAddr: String) {
@@ -561,11 +562,13 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
             }
         }
         isBusy = false
-        if (result.wrongPassword) {
-            snackbarHostState.showSnackbar("رمز فعلی اشتباه است. از دکمه 🔑 بالای صفحه رمز واقعی دستگاه را تنظیم کنید.")
-        } else {
+        if (result.success) {
             snackbarHostState.showSnackbar(result.message)
-            if (result.success) viewModel.refreshMiner(ipAddr)
+            viewModel.refreshMiner(ipAddr)
+        } else {
+            // پیام خطا ممکن است شامل جزئیات تشخیصی طولانی (کد/پاسخ خام دستگاه) باشد؛
+            // به‌جای Snackbar (که کوتاه و زودگذر است) در یک دیالوگ قابل‌کپی نشان داده می‌شود
+            errorDetailDialog = result.message
         }
     }
 
@@ -915,6 +918,25 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
             },
             dismissButton = {
                 TextButton(onClick = { showSetPasswordDialog = false }) { Text("انصراف") }
+            }
+        )
+    }
+
+    // ===== دیالوگ نمایش جزئیات خطای عملیات ممتاز (ریبوت/تغییر پول) برای اشکال‌زدایی =====
+    errorDetailDialog?.let { detail ->
+        AlertDialog(
+            onDismissRequest = { errorDetailDialog = null },
+            icon = { Icon(Icons.Filled.ErrorOutline, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("عملیات ناموفق بود") },
+            text = { Text(detail, style = MaterialTheme.typography.bodySmall) },
+            confirmButton = {
+                TextButton(onClick = {
+                    clipboard.setText(AnnotatedString(detail))
+                    scope.launch { snackbarHostState.showSnackbar("کپی شد") }
+                }) { Text("کپی متن") }
+            },
+            dismissButton = {
+                TextButton(onClick = { errorDetailDialog = null }) { Text("بستن") }
             }
         )
     }
