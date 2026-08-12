@@ -1008,6 +1008,8 @@ fun ErrorsSection(miner: MinerInfo, onRetryCheck: (() -> Unit)? = null) {
             }
         }
     } else {
+        var showRawDialog by remember { mutableStateOf(false) }
+        val clipboard = LocalClipboardManager.current
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF4CAF50).copy(alpha = 0.10f))
         ) {
@@ -1017,11 +1019,31 @@ fun ErrorsSection(miner: MinerInfo, onRetryCheck: (() -> Unit)? = null) {
             ) {
                 Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = Color(0xFF4CAF50))
                 Spacer(modifier = Modifier.width(8.dp))
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text("سلامت دستگاه: عالی", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = Color(0xFF4CAF50))
                     Text("هیچ کد خطای فعالی گزارش نشده است", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                if (miner.errorRawResponse != null) {
+                    IconButton(onClick = { showRawDialog = true }, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Filled.BugReport, contentDescription = "دیدن پاسخ خام برای اشکال‌زدایی", tint = Color(0xFF4CAF50))
+                    }
+                }
             }
+        }
+        if (showRawDialog && miner.errorRawResponse != null) {
+            AlertDialog(
+                onDismissRequest = { showRawDialog = false },
+                title = { Text("پاسخ خام get_error_code") },
+                text = { Text(miner.errorRawResponse, style = MaterialTheme.typography.bodySmall) },
+                confirmButton = {
+                    TextButton(onClick = { clipboard.setText(AnnotatedString(miner.errorRawResponse)) }) {
+                        Text("کپی متن")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showRawDialog = false }) { Text("بستن") }
+                }
+            )
         }
     }
 }

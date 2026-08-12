@@ -138,10 +138,11 @@ object WhatsminerClient {
 
     // فهرست کدهای خطای فعال دستگاه؛ چون این دستور معمولا آخرین دستور در چرخهٔ خواندن اطلاعات یک
     // دستگاه است (بعد از ۷ اتصال دیگر) و دستگاه‌های Whatsminer گاهی به اتصال‌های پشت‌سرهم سریع
-    // به‌کندی/ناپایدار پاسخ می‌دهند، در صورت شکست یک‌بار دیگر با کمی مکث تلاش می‌شود
-    suspend fun fetchErrorCode(ip: String): JSONObject? {
-        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_error_code"}""", retries = 1) ?: return null
-        return runCatching { JSONObject(raw) }.getOrNull()
+    // به‌کندی/ناپایدار پاسخ می‌دهند، در صورت شکست یک‌بار دیگر با کمی مکث تلاش می‌شود.
+    // متن خام پاسخ هم برگردانده می‌شود (حتی اگر parse نشود) تا در صورت نیاز برای اشکال‌زدایی نشان داده شود
+    suspend fun fetchErrorCode(ip: String): Pair<JSONObject?, String?> {
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_error_code"}""", retries = 1) ?: return null to null
+        return runCatching { JSONObject(raw) }.getOrNull() to raw
     }
 
     suspend fun queryMiner(ip: String): MinerInfo {
@@ -174,10 +175,10 @@ object WhatsminerClient {
         val poolObj = firstArrayObject(poolsRoot, "POOLS")
         delay(60)
         val errorRoot = fetchErrorCode(ip)
-        val errorCodes = parseErrorCodes(errorRoot)
+        val errorCodes = parseErrorCodes(errorRoot.first)
         // اگر errorRoot عملا null باشد یعنی دستور get_error_code اصلا پاسخ نگرفته (نه اینکه دستگاه
         // واقعا خطایی نداشته)؛ این تفاوت را جدا نگه می‌داریم تا در UI به‌جای «سالم» به‌درستی «قابل بررسی نبود» نشان داده شود
-        val errorCheckFailed = errorRoot == null
+        val errorCheckFailed = errorRoot.first == null
 
         val hashboards = parseHashboards(devsArray)
         val avgTemp = hashboards.mapNotNull { it.temperaturePcb ?: it.temperatureChip }
@@ -216,7 +217,8 @@ object WhatsminerClient {
             poolWorkerName = findString(poolObj, listOf("User")),
             poolUrl = findString(poolObj, listOf("URL")),
             errorCodes = errorCodes,
-            errorCheckFailed = errorCheckFailed
+            errorCheckFailed = errorCheckFailed,
+            errorRawResponse = errorRoot.second
         )
     }
 
@@ -559,20 +561,28 @@ object WhatsminerClient {
 
         val code = resultJson.optInt("Code", -1)
         val status = resultJson.optString("STATUS")
+        val deviceMsg = resultJson.optString("Msg")
         return when {
+            code == 45 && deviceMsg.contains("write", ignoreCase = true) -> PrivilegedResult(
+                false,
+                "دسترسی نوشتن (Write) API روی این دستگاه غیرفعال است — این ربطی به رمز عبور ندارد. " +
+                    "باید مستقیماً روی خود دستگاه فعالش کنید: وارد صفحه وب دستگاه (http://${ip}) بشوید و از " +
+                    "مسیر Settings → Remote Ctrl → Miner API Switch گزینه Enable را بزنید (یا اگر آن گزینه در " +
+                    "صفحه وب نبود، از نرم‌افزار رسمی WhatsMinerTool همین کار را انجام دهید). پاسخ کامل دستگاه: $resultJson"
+            )
             code == 45 -> PrivilegedResult(
                 false,
                 if (decryptFailed)
-                    "رمز اشتباه گزارش شد، ولی رمزگشایی پاسخ هم ناموفق بود — احتمالاً نسخه پروتکل دستگاه با این کد یکی نیست (کد خام: ${raw.take(150)})"
+                    "کد ۴۵ (permission denied) گزارش شد، ولی رمزگشایی پاسخ هم ناموفق بود — احتمالاً نسخه پروتکل دستگاه با این کد یکی نیست (کد خام: ${raw.take(150)})"
                 else
-                    "رمز عبور اشتباه است (کد ۴۵ از دستگاه، پاسخ کامل: ${resultJson})",
+                    "دسترسی رد شد (کد ۴۵ از دستگاه). ممکن است رمز عبور اشتباه باشد یا API Write روی دستگاه غیرفعال باشد. پاسخ کامل: $resultJson",
                 wrongPassword = true
             )
             code == 131 || status.equals("S", ignoreCase = true) ->
                 PrivilegedResult(true, "عملیات با موفقیت انجام شد")
             else -> PrivilegedResult(
                 false,
-                "خطای دستگاه — کد: $code، پیام: ${resultJson.optString("Msg").ifBlank { "نامشخص" }}، پاسخ کامل: ${resultJson}"
+                "خطای دستگاه — کد: $code، پیام: ${deviceMsg.ifBlank { "نامشخص" }}، پاسخ کامل: $resultJson"
             )
         }
     }

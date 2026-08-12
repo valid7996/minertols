@@ -39,7 +39,8 @@ data class MinerInfo(
     val poolWorkerName: String? = null,      // نام Worker تنظیم‌شده در استخر
     val poolUrl: String? = null,             // آدرس استخر متصل
     val errorCodes: List<Int> = emptyList(), // کدهای خطای فعال دستگاه
-    val errorCheckFailed: Boolean = false    // true یعنی نتوانستیم از دستگاه کد خطا بگیریم (نه اینکه واقعا سالم است)
+    val errorCheckFailed: Boolean = false,   // true یعنی نتوانستیم از دستگاه کد خطا بگیریم (نه اینکه واقعا سالم است)
+    val errorRawResponse: String? = null     // پاسخ خام JSON دستور get_error_code، برای اشکال‌زدایی وقتی نتیجه با انتظار همخوانی ندارد
 ) {
     // آیا دستگاه سالم است (بدون کد خطای فعال)؟
     val isHealthy: Boolean
