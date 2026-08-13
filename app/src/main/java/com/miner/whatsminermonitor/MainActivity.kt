@@ -1161,6 +1161,42 @@ fun IncomeSection(
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()
         )
+
+        // شفافیت محاسبه: دقیقاً همان چیزی که در محاسبه استفاده شده نشان داده می‌شود (قیمت،
+        // هشریت شبکه، پاداش بلاک، هشریت خود دستگاه) تا مقدار قابل بررسی و اعتماد باشد
+        val usedHashrateThs = miner.ghsAverageThs ?: miner.totalHashrateThs
+        var showDetails by remember { mutableStateOf(false) }
+        Spacer(modifier = Modifier.height(2.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { showDetails = !showDetails },
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (showDetails) "پنهان کردن جزئیات محاسبه ▲" else "جزئیات محاسبه ▼",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFFF7931A).copy(alpha = 0.8f)
+            )
+        }
+        if (showDetails) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.5f))
+                    .padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                CalcDetailRow("هشریت این دستگاه", usedHashrateThs?.let { "%.2f TH/s".format(it) } ?: "—")
+                CalcDetailRow("هشریت کل شبکه", "%.2f EH/s".format(networkHashrateEh))
+                CalcDetailRow("پاداش هر بلاک", "3.125 BTC")
+                CalcDetailRow("قیمت محاسبه", btcPriceUsdt?.let { "$%.2f".format(it) } ?: "—")
+                CalcDetailRow("منبع قیمت", priceSource ?: "—")
+            }
+        }
     }
 }
 
@@ -1173,6 +1209,19 @@ fun IncomeRow(label: String, value: String, color: Color) {
     ) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = color)
+    }
+}
+
+// یک ردیف در پنل «جزئیات محاسبه»: نشان می‌دهد دقیقاً کدام مقادیر برای محاسبهٔ درآمد استفاده شدند
+@Composable
+fun CalcDetailRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+        Text(value, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f))
     }
 }
 
