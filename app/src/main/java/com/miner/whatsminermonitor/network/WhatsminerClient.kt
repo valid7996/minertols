@@ -220,39 +220,49 @@ object WhatsminerClient {
         )
     }
 
-    // پارس کردن پاسخ get_error_code به فهرستی از کدهای عددی خطای فعال
-    // طبق مستندات رسمی، ساختار پاسخ یک شیء است: {"error_code": {"<code>": "<timestamp>", ...}}
-    // اما برای اطمینان، حالت آرایه‌ای قدیمی و همچنین نام‌های احتمالاً متفاوت در فریمورهای دیگر هم پشتیبان دارد
+    // پارس کردن پاسخ get_error_code به فهرستی از کدهای عددی خطای فعال.
+    // روی دستگاه واقعی (تأییدشده با یک پاسخ خام واقعی) این شکل است:
+    //   {"error_code":[{"202":"2026-08-12 23:58:21"}]}
+    // یعنی «error_code» یک آرایه است و هر عضو آن یک شیء تک‌کلیدی است که خودِ کلید، کد خطاست
+    // (نه یک فیلد جدا به اسم "code"). قبلاً این حالت پشتیبانی نمی‌شد و به همین دلیل با اینکه
+    // دستگاه کد خطای فعال داشت، برنامه چیزی نشان نمی‌داد. علاوه بر این حالت واقعی، دو حالت دیگر
+    // (شیء مستقیم طبق مستندات رسمی، و آرایه‌ای از اشیای نام‌دار مثل {"code":"202",...}) هم به
+    //‌عنوان پشتیبان نگه داشته شده‌اند چون ممکن است بین نسخه‌های مختلف فریمور فرق داشته باشند.
     private fun parseErrorCodes(root: JSONObject?): List<Int> {
         if (root == null) return emptyList()
         val msg = root.optJSONObject("Msg") ?: root
         val result = sortedSetOf<Int>()
 
-        val obj = msg.optJSONObject("error_code")
-        if (obj != null) {
-            val keys = obj.keys()
-            while (keys.hasNext()) {
-                val code = keys.next().trim().toIntOrNull()
-                if (code != null && code != 0) result.add(code)
-            }
+        // حالت ۱: error_code مستقیماً یک شیء است -> {"error_code": {"202": "زمان", ...}}
+        msg.optJSONObject("error_code")?.let { obj ->
+            addCodesFromObjectKeys(obj, result)
             return result.toList()
         }
 
+        // حالت ۲ و ۳: error_code یک آرایه است
         val arr = msg.optJSONArray("error_code")
         if (arr != null) {
             for (i in 0 until arr.length()) {
-                val item = arr.opt(i)
-                val code: Int? = when (item) {
-                    is JSONObject -> listOf(
-                        item.optString("error_code"),
-                        item.optString("code"),
-                        item.optString("ErrCode")
-                    ).firstOrNull { it.isNotBlank() }?.toIntOrNull()
-                    is Number -> item.toInt()
-                    is String -> item.trim().toIntOrNull()
-                    else -> null
+                when (val item = arr.opt(i)) {
+                    is JSONObject -> {
+                        // حالت ۲: عضو آرایه یک شیء نام‌دار است -> {"code":"202", "time":"..."}
+                        val named = listOf(
+                            item.optString("error_code"),
+                            item.optString("code"),
+                            item.optString("ErrCode")
+                        ).firstOrNull { it.isNotBlank() }?.toIntOrNull()
+                        if (named != null && named != 0) {
+                            result.add(named)
+                        } else {
+                            // حالت ۳ (همان چیزی که روی دستگاه واقعی دیده شد):
+                            // عضو آرایه {"202":"زمان"} است؛ خودِ کلید شیء، کد خطاست
+                            addCodesFromObjectKeys(item, result)
+                        }
+                    }
+                    is Number -> if (item.toInt() != 0) result.add(item.toInt())
+                    is String -> item.trim().toIntOrNull()?.let { if (it != 0) result.add(it) }
+                    else -> {}
                 }
-                if (code != null && code != 0) result.add(code)
             }
             return result.toList()
         }
@@ -262,17 +272,14 @@ object WhatsminerClient {
         val fallbackKeys = msg.keys().asSequence().filter { it.contains("error", ignoreCase = true) }
         for (k in fallbackKeys) {
             when (val v = msg.opt(k)) {
-                is JSONObject -> {
-                    val ks = v.keys()
-                    while (ks.hasNext()) ks.next().trim().toIntOrNull()?.let { if (it != 0) result.add(it) }
-                }
+                is JSONObject -> addCodesFromObjectKeys(v, result)
                 is JSONArray -> for (i in 0 until v.length()) {
-                    val code = when (val item = v.opt(i)) {
-                        is Number -> item.toInt()
-                        is String -> item.trim().toIntOrNull()
-                        else -> null
+                    when (val item = v.opt(i)) {
+                        is JSONObject -> addCodesFromObjectKeys(item, result)
+                        is Number -> if (item.toInt() != 0) result.add(item.toInt())
+                        is String -> item.trim().toIntOrNull()?.let { c -> if (c != 0) result.add(c) }
+                        else -> {}
                     }
-                    if (code != null && code != 0) result.add(code)
                 }
                 is Number -> if (v.toInt() != 0) result.add(v.toInt())
                 is String -> v.trim().toIntOrNull()?.let { if (it != 0) result.add(it) }
@@ -280,6 +287,15 @@ object WhatsminerClient {
             }
         }
         return result.toList()
+    }
+
+    // کلیدهای یک شیء JSON را به‌عنوان کد خطا استخراج می‌کند - برای حالتی که خودِ کلید شیء
+    // کد خطاست، مثل {"202": "2026-08-12 23:58:21"} یا {"202": "...", "301": "..."}
+    private fun addCodesFromObjectKeys(obj: JSONObject, result: MutableSet<Int>) {
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            keys.next().trim().toIntOrNull()?.let { if (it != 0) result.add(it) }
+        }
     }
 
     private fun parseHashboards(devsArray: JSONArray?): List<HashboardInfo> {
