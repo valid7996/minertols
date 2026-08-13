@@ -138,11 +138,10 @@ object WhatsminerClient {
 
     // فهرست کدهای خطای فعال دستگاه؛ چون این دستور معمولا آخرین دستور در چرخهٔ خواندن اطلاعات یک
     // دستگاه است (بعد از ۷ اتصال دیگر) و دستگاه‌های Whatsminer گاهی به اتصال‌های پشت‌سرهم سریع
-    // به‌کندی/ناپایدار پاسخ می‌دهند، در صورت شکست یک‌بار دیگر با کمی مکث تلاش می‌شود.
-    // متن خام پاسخ هم برگردانده می‌شود (حتی اگر parse نشود) تا در صورت نیاز برای اشکال‌زدایی نشان داده شود
-    suspend fun fetchErrorCode(ip: String): Pair<JSONObject?, String?> {
-        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_error_code"}""", retries = 1) ?: return null to null
-        return runCatching { JSONObject(raw) }.getOrNull() to raw
+    // به‌کندی/ناپایدار پاسخ می‌دهند، در صورت شکست یک‌بار دیگر با کمی مکث تلاش می‌شود
+    suspend fun fetchErrorCode(ip: String): JSONObject? {
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_error_code"}""", retries = 1) ?: return null
+        return runCatching { JSONObject(raw) }.getOrNull()
     }
 
     suspend fun queryMiner(ip: String): MinerInfo {
@@ -175,10 +174,10 @@ object WhatsminerClient {
         val poolObj = firstArrayObject(poolsRoot, "POOLS")
         delay(60)
         val errorRoot = fetchErrorCode(ip)
-        val errorCodes = parseErrorCodes(errorRoot.first)
+        val errorCodes = parseErrorCodes(errorRoot)
         // اگر errorRoot عملا null باشد یعنی دستور get_error_code اصلا پاسخ نگرفته (نه اینکه دستگاه
         // واقعا خطایی نداشته)؛ این تفاوت را جدا نگه می‌داریم تا در UI به‌جای «سالم» به‌درستی «قابل بررسی نبود» نشان داده شود
-        val errorCheckFailed = errorRoot.first == null
+        val errorCheckFailed = errorRoot == null
 
         val hashboards = parseHashboards(devsArray)
         val avgTemp = hashboards.mapNotNull { it.temperaturePcb ?: it.temperatureChip }
@@ -217,32 +216,13 @@ object WhatsminerClient {
             poolWorkerName = findString(poolObj, listOf("User")),
             poolUrl = findString(poolObj, listOf("URL")),
             errorCodes = errorCodes,
-            errorCheckFailed = errorCheckFailed,
-            errorRawResponse = errorRoot.second
+            errorCheckFailed = errorCheckFailed
         )
-    }
-
-    // یک رشتهٔ کد خطا را به عدد تبدیل می‌کند؛ هم فرمت اعشاری معمولی (مثلا "203") و هم فرمت
-    // هگزادسیمال (مثلا "0x0800" یا حتی بدون پیشوند مثل "0800" برای کدهای پاور که در کاتالوگ
-    // هم به‌صورت هگز تعریف شده‌اند) را پشتیبانی می‌کند. قبلاً فقط toIntOrNull ساده استفاده می‌شد
-    // که باعث می‌شد کدهای هگزادسیمال بی‌صدا نادیده گرفته شوند و در نتیجه با وجود خطای واقعی روی
-    // دستگاه، برنامه پیام «سالم» نشان دهد
-    private fun parseCodeToken(raw: String): Int? {
-        val s = raw.trim()
-        if (s.isEmpty()) return null
-        s.toIntOrNull()?.let { return it }
-        if (s.startsWith("0x", ignoreCase = true)) {
-            return s.substring(2).toIntOrNull(16)
-        }
-        return null
     }
 
     // پارس کردن پاسخ get_error_code به فهرستی از کدهای عددی خطای فعال
     // طبق مستندات رسمی، ساختار پاسخ یک شیء است: {"error_code": {"<code>": "<timestamp>", ...}}
-    // اما برای اطمینان، حالت آرایه‌ای قدیمی و همچنین نام‌های احتمالاً متفاوت در فریمورهای دیگر هم پشتیبان دارد.
-    // نکته مهم: اگر کلید error_code پیدا شد ولی هیچ‌کدام از مقادیرش قابل‌تبدیل به عدد نبودند (مثلا
-    // به‌خاطر فرمت هگز)، دیگر بلافاصله با لیست خالی return نمی‌کنیم؛ به‌جای آن به روش‌های
-    // جایگزین (fallback) هم سر می‌زنیم تا کد خطا به‌اشتباه گم نشود
+    // اما برای اطمینان، حالت آرایه‌ای قدیمی و همچنین نام‌های احتمالاً متفاوت در فریمورهای دیگر هم پشتیبان دارد
     private fun parseErrorCodes(root: JSONObject?): List<Int> {
         if (root == null) return emptyList()
         val msg = root.optJSONObject("Msg") ?: root
@@ -252,31 +232,30 @@ object WhatsminerClient {
         if (obj != null) {
             val keys = obj.keys()
             while (keys.hasNext()) {
-                parseCodeToken(keys.next())?.let { if (it != 0) result.add(it) }
+                val code = keys.next().trim().toIntOrNull()
+                if (code != null && code != 0) result.add(code)
             }
+            return result.toList()
         }
 
-        if (result.isEmpty()) {
-            val arr = msg.optJSONArray("error_code")
-            if (arr != null) {
-                for (i in 0 until arr.length()) {
-                    val item = arr.opt(i)
-                    val code: Int? = when (item) {
-                        is JSONObject -> listOf(
-                            item.optString("error_code"),
-                            item.optString("code"),
-                            item.optString("ErrCode")
-                        ).firstOrNull { it.isNotBlank() }?.let(::parseCodeToken)
-                        is Number -> item.toInt()
-                        is String -> parseCodeToken(item)
-                        else -> null
-                    }
-                    if (code != null && code != 0) result.add(code)
+        val arr = msg.optJSONArray("error_code")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val item = arr.opt(i)
+                val code: Int? = when (item) {
+                    is JSONObject -> listOf(
+                        item.optString("error_code"),
+                        item.optString("code"),
+                        item.optString("ErrCode")
+                    ).firstOrNull { it.isNotBlank() }?.toIntOrNull()
+                    is Number -> item.toInt()
+                    is String -> item.trim().toIntOrNull()
+                    else -> null
                 }
+                if (code != null && code != 0) result.add(code)
             }
+            return result.toList()
         }
-
-        if (result.isNotEmpty()) return result.toList()
 
         // یافت نشد؛ به‌جای فرض «بدون خطا»، به‌صورت پشتیبان دنبال هر کلیدی می‌گردیم که
         // شامل «error» باشد (برخی فریمورها ممکن است از نام دیگری به‌جای error_code استفاده کنند)
@@ -285,18 +264,18 @@ object WhatsminerClient {
             when (val v = msg.opt(k)) {
                 is JSONObject -> {
                     val ks = v.keys()
-                    while (ks.hasNext()) parseCodeToken(ks.next())?.let { if (it != 0) result.add(it) }
+                    while (ks.hasNext()) ks.next().trim().toIntOrNull()?.let { if (it != 0) result.add(it) }
                 }
                 is JSONArray -> for (i in 0 until v.length()) {
                     val code = when (val item = v.opt(i)) {
                         is Number -> item.toInt()
-                        is String -> parseCodeToken(item)
+                        is String -> item.trim().toIntOrNull()
                         else -> null
                     }
                     if (code != null && code != 0) result.add(code)
                 }
                 is Number -> if (v.toInt() != 0) result.add(v.toInt())
-                is String -> parseCodeToken(v)?.let { if (it != 0) result.add(it) }
+                is String -> v.trim().toIntOrNull()?.let { if (it != 0) result.add(it) }
                 else -> {}
             }
         }
@@ -498,18 +477,15 @@ object WhatsminerClient {
         return decrypted.toString(Charsets.UTF_8).trimEnd('\u0000')
     }
 
-    // نسخه تشخیصی get_token: به‌جای null ساده، متن خام پاسخ دستگاه را هم برمی‌گرداند تا در صورت
-    // شکست بشود دقیقاً دید دستگاه چه چیزی پس داده (مثلاً یک فیلد با نام دیگر یا یک ساختار متفاوت)
-    private suspend fun getTokenDebug(ip: String): Pair<TokenInfo?, String?> {
-        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_token"}""", retries = 1)
-            ?: return null to null
-        val json = runCatching { JSONObject(raw) }.getOrNull() ?: return null to raw
-        val msg = json.optJSONObject("Msg") ?: return null to raw
+    private suspend fun getToken(ip: String): TokenInfo? {
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_token"}""", retries = 1) ?: return null
+        val json = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+        val msg = json.optJSONObject("Msg") ?: return null
         val time = msg.optString("time")
         val salt = msg.optString("salt")
         val newSalt = msg.optString("newsalt")
-        if (time.isBlank() || salt.isBlank() || newSalt.isBlank()) return null to raw
-        return TokenInfo(time, salt, newSalt) to raw
+        if (time.isBlank() || salt.isBlank() || newSalt.isBlank()) return null
+        return TokenInfo(time, salt, newSalt)
     }
 
     private fun jsonEscape(value: String): String =
@@ -518,21 +494,14 @@ object WhatsminerClient {
     /**
      * یک دستور ممتاز را با گرفتن توکن تازه، امضا کردن با رمز عبور دستگاه، و رمزنگاری AES-256-ECB
      * کل دستور (طبق پروتکل رسمی) اجرا می‌کند. buildCommand باید JSON کامل شامل فیلد "token" را بسازد.
-     *
-     * اگر عملیات شکست بخورد، پیام خطا شامل جزئیات خام دستگاه (کد/پیام واقعی برگشتی و نسخه فریمور)
-     * هم می‌شود؛ چون این پروتکل بین نسخه‌های مختلف فریمور Whatsminer فرق می‌کند و بدون دیدن دادهٔ
-     * خام دستگاه نمی‌شود مطمئن شد مشکل از رمز اشتباه است یا از عدم تطابق نسخهٔ پروتکل
      */
     private suspend fun sendPrivileged(
         ip: String,
         password: String,
         buildCommand: (token: String) -> String
     ): PrivilegedResult {
-        val (token, tokenRaw) = getTokenDebug(ip)
-        if (token == null) {
-            val hint = tokenRaw?.take(200) ?: "بدون پاسخ"
-            return PrivilegedResult(false, "دریافت توکن ناموفق بود. پاسخ خام دستگاه: $hint")
-        }
+        val token = getToken(ip)
+            ?: return PrivilegedResult(false, "اتصال برای دریافت توکن از دستگاه ناموفق بود")
 
         val keyHash = md5CryptHashPart(password, token.salt)
         val sign = md5CryptHashPart(keyHash + token.time, token.newSalt)
@@ -542,48 +511,27 @@ object WhatsminerClient {
         val encryptedPayload = """{"enc":1,"data":"${aesEncryptEcb(commandJson, aesKey)}"}"""
 
         val raw = sendRawCommand(ip, encryptedPayload)
-            ?: return PrivilegedResult(false, "پاسخی از دستگاه دریافت نشد (بعد از دریافت توکن موفق)")
+            ?: return PrivilegedResult(false, "پاسخی از دستگاه دریافت نشد")
         val rawJson = runCatching { JSONObject(raw) }.getOrNull()
-            ?: return PrivilegedResult(false, "پاسخ نامعتبر از دستگاه: ${raw.take(200)}")
+            ?: return PrivilegedResult(false, "پاسخ نامعتبر از دستگاه")
 
         // پاسخ طبق پروتکل رسمی رمزنگاری‌شده برمی‌گردد: {"enc":"<base64>"}
         // برای اطمینان، اگر فریمورِ خاصی پاسخ را رمزنگاری‌نشده برگرداند هم پشتیبانی می‌شود
         val encField = rawJson.opt("enc")
-        var decryptFailed = false
         val resultJson = if (encField is String && encField.isNotBlank()) {
             val decrypted = runCatching { aesDecryptEcb(encField, aesKey) }.getOrNull()
-            val parsed = decrypted?.let { runCatching { JSONObject(it) }.getOrNull() }
-            if (parsed == null) decryptFailed = true
-            parsed ?: rawJson
+            decrypted?.let { runCatching { JSONObject(it) }.getOrNull() } ?: rawJson
         } else {
             rawJson
         }
 
         val code = resultJson.optInt("Code", -1)
         val status = resultJson.optString("STATUS")
-        val deviceMsg = resultJson.optString("Msg")
         return when {
-            code == 45 && deviceMsg.contains("write", ignoreCase = true) -> PrivilegedResult(
-                false,
-                "دسترسی نوشتن (Write) API روی این دستگاه غیرفعال است — این ربطی به رمز عبور ندارد. " +
-                    "باید مستقیماً روی خود دستگاه فعالش کنید: وارد صفحه وب دستگاه (http://${ip}) بشوید و از " +
-                    "مسیر Settings → Remote Ctrl → Miner API Switch گزینه Enable را بزنید (یا اگر آن گزینه در " +
-                    "صفحه وب نبود، از نرم‌افزار رسمی WhatsMinerTool همین کار را انجام دهید). پاسخ کامل دستگاه: $resultJson"
-            )
-            code == 45 -> PrivilegedResult(
-                false,
-                if (decryptFailed)
-                    "کد ۴۵ (permission denied) گزارش شد، ولی رمزگشایی پاسخ هم ناموفق بود — احتمالاً نسخه پروتکل دستگاه با این کد یکی نیست (کد خام: ${raw.take(150)})"
-                else
-                    "دسترسی رد شد (کد ۴۵ از دستگاه). ممکن است رمز عبور اشتباه باشد یا API Write روی دستگاه غیرفعال باشد. پاسخ کامل: $resultJson",
-                wrongPassword = true
-            )
+            code == 45 -> PrivilegedResult(false, "رمز عبور اشتباه است", wrongPassword = true)
             code == 131 || status.equals("S", ignoreCase = true) ->
                 PrivilegedResult(true, "عملیات با موفقیت انجام شد")
-            else -> PrivilegedResult(
-                false,
-                "خطای دستگاه — کد: $code، پیام: ${deviceMsg.ifBlank { "نامشخص" }}، پاسخ کامل: $resultJson"
-            )
+            else -> PrivilegedResult(false, resultJson.optString("Msg").ifBlank { "خطای نامشخص از دستگاه (کد $code)" })
         }
     }
 

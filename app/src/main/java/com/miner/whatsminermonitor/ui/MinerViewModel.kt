@@ -60,7 +60,7 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
 
         // فقط اگر هیچ‌کدام از منابع زنده (mempool.space / blockchain.info) در دسترس نبود استفاده می‌شود؛
         // آخرین‌بار در آگوست ۲۰۲۶ به‌روزرسانی شده (هشریت واقعی شبکه معمولاً کمی بیشتر از این است)
-        private const val FALLBACK_NETWORK_HASHRATE_EH = 930.0
+        private const val FALLBACK_NETWORK_HASHRATE_EH = 994.68
     }
 
     init {

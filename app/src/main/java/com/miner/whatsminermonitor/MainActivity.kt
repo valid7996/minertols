@@ -15,6 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -35,6 +36,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,6 +52,7 @@ import com.miner.whatsminermonitor.model.PoolEntry
 import com.miner.whatsminermonitor.model.PoolProfile
 import com.miner.whatsminermonitor.model.PoolProfiles
 import com.miner.whatsminermonitor.model.WhatsminerErrorDetail
+import com.miner.whatsminermonitor.network.LuciMinerClient
 import com.miner.whatsminermonitor.network.PrivilegedResult
 import com.miner.whatsminermonitor.network.WhatsminerClient
 import com.miner.whatsminermonitor.ui.CredentialsStore
@@ -113,7 +117,7 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
 
     val reachableMiners = miners.filter { it.isReachable }
     val totalThs = reachableMiners.sumOf { it.ghsAverageThs ?: it.totalHashrateThs ?: 0.0 }
-    val networkEh = networkHashrateEh ?: 930.0
+    val networkEh = networkHashrateEh ?: 994.68
     val totalDailyUsdt = btcPriceUsdt?.let { price ->
         reachableMiners.sumOf { it.estimatedDailyBtc(networkEh) * price }
     }
@@ -409,7 +413,7 @@ fun MinerDeviceIcon(modifier: Modifier = Modifier, tint: Color = Color(0xFF3A3A3
 // آیتم فشرده لیست ماینرها روی صفحه اصلی + دکمه باز کردن جزئیات
 // ==================================================================================
 @Composable
-fun MinerListItem(miner: MinerInfo, btcPriceUsdt: Double?, networkHashrateEh: Double = 930.0, onOpen: () -> Unit) {
+fun MinerListItem(miner: MinerInfo, btcPriceUsdt: Double?, networkHashrateEh: Double = 994.68, onOpen: () -> Unit) {
     val dailyUsdt = btcPriceUsdt?.let { miner.estimatedDailyBtc(networkHashrateEh) * it }
 
     Column {
@@ -546,29 +550,55 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
     var showRebootConfirm by remember { mutableStateOf(false) }
     var showPoolPicker by remember { mutableStateOf(false) }
     var poolPendingConfirm by remember { mutableStateOf<PoolProfile?>(null) }
-    var showSetPasswordDialog by remember { mutableStateOf(false) }
-    var errorDetailDialog by remember { mutableStateOf<String?>(null) }
+    var showPasswordDialog by remember { mutableStateOf(false) }
+    var pendingAction by remember { mutableStateOf<PendingPrivilegedAction?>(null) }
     var isBusy by remember { mutableStateOf(false) }
 
     suspend fun runPrivileged(action: PendingPrivilegedAction, ipAddr: String) {
         isBusy = true
         val password = CredentialsStore.getPassword(context, ipAddr)
-        val result: PrivilegedResult = when (action) {
-            is PendingPrivilegedAction.Reboot -> WhatsminerClient.reboot(ipAddr, password)
-            is PendingPrivilegedAction.SwitchPool -> {
-                val workerName = miner?.poolWorkerName?.takeIf { it.isNotBlank() } ?: "worker1"
-                val entries = action.profile.addresses.map { PoolEntry(url = it, worker = workerName) }
-                WhatsminerClient.updatePools(ipAddr, password, entries)
-            }
+        val username = CredentialsStore.DEFAULT_USERNAME
+
+        fun poolEntries(profile: PoolProfile): List<PoolEntry> {
+            val workerName = miner?.poolWorkerName?.takeIf { it.isNotBlank() } ?: "worker1"
+            return profile.addresses.map { PoolEntry(url = it, worker = workerName) }
         }
+
+        // روش اول: پنل وب مدیریت دستگاه (LuCI روی HTTPS) - طبق بررسی یک اپ مشابه که واقعاً روی
+        // دستگاه‌های واقعی کار می‌کند، این همان راهی است که ریبوت/تغییر پول واقعاً از آن انجام می‌شود
+        val luciResult: LuciMinerClient.LuciResult = when (action) {
+            is PendingPrivilegedAction.Reboot -> LuciMinerClient.reboot(ipAddr, username, password)
+            is PendingPrivilegedAction.SwitchPool -> LuciMinerClient.updatePools(ipAddr, username, password, poolEntries(action.profile))
+        }
+
+        var success = luciResult.success
+        var message = luciResult.message
+        var wrongPassword = luciResult.wrongPassword
+
+        // روش دوم (پشتیبان): اگر پنل وب در دسترس نبود (نه به‌خاطر رمز)، از API خام دستگاه امتحان می‌شود
+        if (!success && !wrongPassword) {
+            val tcpResult: PrivilegedResult = when (action) {
+                is PendingPrivilegedAction.Reboot -> WhatsminerClient.reboot(ipAddr, password)
+                is PendingPrivilegedAction.SwitchPool -> WhatsminerClient.updatePools(ipAddr, password, poolEntries(action.profile))
+            }
+            if (tcpResult.success) {
+                success = true
+                message = tcpResult.message
+            } else if (tcpResult.wrongPassword) {
+                wrongPassword = true
+                message = tcpResult.message
+            }
+            // اگر روش دوم هم شکست خورد ولی نه به‌خاطر رمز، همان پیام روش اول (LuCI) نگه داشته می‌شود
+        }
+
         isBusy = false
-        if (result.success) {
-            snackbarHostState.showSnackbar(result.message)
-            viewModel.refreshMiner(ipAddr)
+        if (wrongPassword && !success) {
+            pendingAction = action
+            showPasswordDialog = true
+            snackbarHostState.showSnackbar("رمز عبور اشتباه است. رمز صحیح دستگاه را وارد کنید.")
         } else {
-            // پیام خطا ممکن است شامل جزئیات تشخیصی طولانی (کد/پاسخ خام دستگاه) باشد؛
-            // به‌جای Snackbar (که کوتاه و زودگذر است) در یک دیالوگ قابل‌کپی نشان داده می‌شود
-            errorDetailDialog = result.message
+            snackbarHostState.showSnackbar(message)
+            if (success) viewModel.refreshMiner(ipAddr)
         }
     }
 
@@ -584,9 +614,6 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                 },
                 actions = {
                     if (miner != null) {
-                        IconButton(onClick = { showSetPasswordDialog = true }) {
-                            Icon(Icons.Filled.Key, contentDescription = "تنظیم رمز دستگاه")
-                        }
                         IconButton(onClick = { viewModel.refreshMiner(miner.ip) }) {
                             Icon(Icons.Filled.Refresh, contentDescription = "بروزرسانی")
                         }
@@ -802,7 +829,7 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                 btcPriceToman = btcPriceToman,
                 usdToToman = usdToToman,
                 priceSource = priceSource,
-                networkHashrateEh = networkHashrateEh ?: 930.0
+                networkHashrateEh = networkHashrateEh ?: 994.68
             )
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -887,22 +914,23 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
         )
     }
 
-    // ===== دیالوگ تنظیم رمز دستگاه (اختیاری، با دکمه 🔑 بالای صفحه باز می‌شود) =====
-    if (showSetPasswordDialog) {
-        var passwordInput by remember { mutableStateOf(CredentialsStore.getPassword(context, miner.ip)) }
+    // ===== دیالوگ وارد کردن رمز عبور (وقتی رمز پیش‌فرض admin کار نکند) =====
+    if (showPasswordDialog) {
+        var passwordInput by remember { mutableStateOf("") }
         AlertDialog(
-            onDismissRequest = { showSetPasswordDialog = false },
-            icon = { Icon(Icons.Filled.Key, contentDescription = null) },
-            title = { Text("رمز عبور ادمین دستگاه") },
+            onDismissRequest = { showPasswordDialog = false },
+            title = { Text("رمز عبور دستگاه") },
             text = {
                 Column {
-                    Text("رمز واقعی ادمین این دستگاه را وارد کنید تا ریبوت و تغییر پول بدون وقفه انجام شود:")
+                    Text("رمز فعلی روی این دستگاه کار نکرد. رمز صحیح ادمین دستگاه را وارد کنید؛ همین رمز روی گوشی ذخیره می‌شود و برای همهٔ ماینرهای دیگر هم امتحان خواهد شد، پس لازم نیست دوباره برای هر دستگاه وارد کنید:")
                     Spacer(modifier = Modifier.height(10.dp))
                     OutlinedTextField(
                         value = passwordInput,
                         onValueChange = { passwordInput = it },
                         label = { Text("رمز عبور") },
                         singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -911,36 +939,21 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                 TextButton(
                     onClick = {
                         CredentialsStore.setPassword(context, miner.ip, passwordInput)
-                        showSetPasswordDialog = false
+                        showPasswordDialog = false
+                        val action = pendingAction
+                        pendingAction = null
+                        if (action != null) {
+                            scope.launch { runPrivileged(action, miner.ip) }
+                        }
                     },
                     enabled = passwordInput.isNotBlank()
-                ) { Text("ذخیره") }
+                ) { Text("تایید و تلاش مجدد") }
             },
             dismissButton = {
-                TextButton(onClick = { showSetPasswordDialog = false }) { Text("انصراف") }
+                TextButton(onClick = { showPasswordDialog = false; pendingAction = null }) { Text("انصراف") }
             }
         )
     }
-
-    // ===== دیالوگ نمایش جزئیات خطای عملیات ممتاز (ریبوت/تغییر پول) برای اشکال‌زدایی =====
-    errorDetailDialog?.let { detail ->
-        AlertDialog(
-            onDismissRequest = { errorDetailDialog = null },
-            icon = { Icon(Icons.Filled.ErrorOutline, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-            title = { Text("عملیات ناموفق بود") },
-            text = { Text(detail, style = MaterialTheme.typography.bodySmall) },
-            confirmButton = {
-                TextButton(onClick = {
-                    clipboard.setText(AnnotatedString(detail))
-                    scope.launch { snackbarHostState.showSnackbar("کپی شد") }
-                }) { Text("کپی متن") }
-            },
-            dismissButton = {
-                TextButton(onClick = { errorDetailDialog = null }) { Text("بستن") }
-            }
-        )
-    }
-
 }
 
 private sealed class PendingPrivilegedAction {
@@ -1008,8 +1021,6 @@ fun ErrorsSection(miner: MinerInfo, onRetryCheck: (() -> Unit)? = null) {
             }
         }
     } else {
-        var showRawDialog by remember { mutableStateOf(false) }
-        val clipboard = LocalClipboardManager.current
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF4CAF50).copy(alpha = 0.10f))
         ) {
@@ -1019,31 +1030,11 @@ fun ErrorsSection(miner: MinerInfo, onRetryCheck: (() -> Unit)? = null) {
             ) {
                 Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = Color(0xFF4CAF50))
                 Spacer(modifier = Modifier.width(8.dp))
-                Column(modifier = Modifier.weight(1f)) {
+                Column {
                     Text("سلامت دستگاه: عالی", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = Color(0xFF4CAF50))
                     Text("هیچ کد خطای فعالی گزارش نشده است", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (miner.errorRawResponse != null) {
-                    IconButton(onClick = { showRawDialog = true }, modifier = Modifier.size(28.dp)) {
-                        Icon(Icons.Filled.BugReport, contentDescription = "دیدن پاسخ خام برای اشکال‌زدایی", tint = Color(0xFF4CAF50))
-                    }
-                }
             }
-        }
-        if (showRawDialog && miner.errorRawResponse != null) {
-            AlertDialog(
-                onDismissRequest = { showRawDialog = false },
-                title = { Text("پاسخ خام get_error_code") },
-                text = { Text(miner.errorRawResponse, style = MaterialTheme.typography.bodySmall) },
-                confirmButton = {
-                    TextButton(onClick = { clipboard.setText(AnnotatedString(miner.errorRawResponse)) }) {
-                        Text("کپی متن")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showRawDialog = false }) { Text("بستن") }
-                }
-            )
         }
     }
 }
@@ -1085,7 +1076,7 @@ fun IncomeSection(
     btcPriceToman: Long?,
     usdToToman: Long?,
     priceSource: String?,
-    networkHashrateEh: Double = 930.0
+    networkHashrateEh: Double = 994.68
 ) {
     val dailyBtc = miner.estimatedDailyBtc(networkHashrateEh)
     val monthlyBtc = dailyBtc * 30
