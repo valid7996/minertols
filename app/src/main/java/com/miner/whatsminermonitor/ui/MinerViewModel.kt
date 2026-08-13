@@ -55,8 +55,9 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
     private val listMutex = Mutex()
 
     companion object {
-        // فاصلهٔ رفرش خودکار قیمت‌ها و هشریت شبکه، برای «زنده» بودن مانیتورینگ
-        private const val PRICE_REFRESH_INTERVAL_MS = 60_000L
+        // فاصلهٔ رفرش خودکار قیمت‌ها و هشریت شبکه، برای «زنده» بودن مانیتورینگ - همان فاصلهٔ
+        // ۳۰ ثانیه‌ای که خود سرور MinerTools هم برای تازه بودن قیمت استفاده می‌کند
+        private const val PRICE_REFRESH_INTERVAL_MS = 30_000L
 
         // فقط اگر هیچ‌کدام از منابع زنده (mempool.space / blockchain.info) در دسترس نبود استفاده می‌شود؛
         // آخرین‌بار در آگوست ۲۰۲۶ به‌روزرسانی شده (هشریت واقعی شبکه معمولاً کمی بیشتر از این است)
@@ -126,18 +127,74 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * دریافت قیمت‌ها با اولویت‌بندی:
-     * 1. Nobitex (بهترین منبع برای قیمت ریال ایران - BTC/RLS و USDT/RLS)
-     * 2. Wallex (صرافی ایرانی دیگر)
-     * 3. Binance USDT قیمت + نرخ تخمینی بازار آزاد
-     * 4. CoinGecko
+     * 1. MinerTools (همان API که اپ مشابه مستقیم استفاده می‌کند - هم قیمت دلاری و هم تومانی
+     *    چند ارز از جمله BTC و USDT در یک درخواست؛ دقیق‌ترین و سریع‌ترین منبع)
+     * 2. Nobitex (صرافی ایرانی، اگر منبع اول در دسترس نبود)
+     * 3. Wallex (صرافی ایرانی دیگر)
+     * 4. Binance USDT قیمت + نرخ تخمینی بازار آزاد
+     * 5. CoinGecko
      * این تابع به‌صورت مستقیم (نه با launch جدید) فراخوانی می‌شود چون همیشه از داخل حلقهٔ رفرش
      * دوره‌ای که خودش روی Dispatchers.IO اجرا می‌شود صدا زده می‌شود
      */
     private fun fetchPricesOnce() {
-        var success = tryNobitex()
+        var success = tryMinerToolsMarket()
+        if (!success) success = tryNobitex()
         if (!success) success = tryWallex()
         if (!success) success = tryBinanceWithEstimate()
         if (!success) tryCoinGecko()
+    }
+
+    /**
+     * MinerTools: endpoint عمومی و بدون نیاز به کلید که یک اپ مشابه مستقیم از سرور خودش می‌گیرد.
+     * در یک درخواست هم قیمت دلاری و هم قیمت تومانی چند ارز (از جمله BTC و USDT) را برمی‌گرداند؛
+     * نرخ دلار هم از روی قیمت تتر (که تقریباً برابر نرخ بازار آزاد دلار است) به‌دست می‌آید.
+     * endpoint: GET https://minertools.org/wp-json/minertools/v1/crypto-market
+     */
+    private fun tryMinerToolsMarket(): Boolean {
+        return try {
+            val conn = URL("https://minertools.org/wp-json/minertools/v1/crypto-market").openConnection() as HttpURLConnection
+            conn.apply {
+                requestMethod = "GET"
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("User-Agent", "WhatsminerMonitor-Android/1.0")
+                connectTimeout = 6000
+                readTimeout = 8000
+            }
+            val response = conn.inputStream.bufferedReader().readText()
+            val json = JSONObject(response)
+            val coins = json.optJSONArray("coins") ?: return false
+
+            var btcUsd: Double? = null
+            var btcToman: Double? = null
+            var usdtToman: Double? = null
+
+            for (i in 0 until coins.length()) {
+                val coin = coins.optJSONObject(i) ?: continue
+                val symbol = coin.optString("symbol").uppercase()
+                val priceUsd = coin.optDouble("priceUsd", Double.NaN)
+                val priceToman = coin.optDouble("priceToman", Double.NaN)
+                if (symbol == "BTC" && !priceUsd.isNaN() && !priceToman.isNaN() && priceUsd > 0 && priceToman > 0) {
+                    btcUsd = priceUsd
+                    btcToman = priceToman
+                }
+                if (symbol == "USDT" && !priceToman.isNaN() && priceToman > 0) {
+                    usdtToman = priceToman
+                }
+            }
+
+            if (btcUsd != null && btcToman != null) {
+                _btcPriceUsdt.value = btcUsd
+                _btcPriceToman.value = btcToman.toLong()
+                // نرخ دلار: ترجیحاً از قیمت تتر (نزدیک‌ترین معادل نرخ آزاد دلار)، وگرنه از تقسیم قیمت بیت‌کوین
+                _usdToToman.value = (usdtToman ?: (btcToman / btcUsd)).toLong()
+                _priceSource.value = "MinerTools"
+                true
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            false
+        }
     }
 
     /**
