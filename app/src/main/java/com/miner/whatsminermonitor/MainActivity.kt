@@ -137,19 +137,15 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { viewModel.startScan() },
+                onClick = { if (isScanning) viewModel.stopScan() else viewModel.startScan() },
                 icon = {
                     if (isScanning) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
+                        Icon(Icons.Filled.Stop, contentDescription = null)
                     } else {
                         Icon(Icons.Filled.Search, contentDescription = null)
                     }
                 },
-                text = { Text(if (isScanning) "در حال اسکن..." else "اسکن شبکه") }
+                text = { Text(if (isScanning) "توقف اسکن" else "اسکن شبکه") }
             )
         }
     ) { padding ->

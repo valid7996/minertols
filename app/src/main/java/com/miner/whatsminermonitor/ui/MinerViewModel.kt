@@ -7,9 +7,11 @@ import com.miner.whatsminermonitor.model.MinerInfo
 import com.miner.whatsminermonitor.network.NetworkScanner
 import com.miner.whatsminermonitor.network.WhatsminerClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -54,6 +56,9 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
 
     private val listMutex = Mutex()
 
+    // نگه‌داری Job اسکن پیوسته تا بشه با دکمه توقف، لغوش کرد
+    private var scanJob: Job? = null
+
     companion object {
         // فاصلهٔ رفرش خودکار قیمت‌ها و هشریت شبکه، برای «زنده» بودن مانیتورینگ - همان فاصلهٔ
         // ۳۰ ثانیه‌ای که خود سرور MinerTools هم برای تازه بودن قیمت استفاده می‌کند
@@ -62,6 +67,13 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
         // فقط اگر هیچ‌کدام از منابع زنده (mempool.space / blockchain.info) در دسترس نبود استفاده می‌شود؛
         // آخرین‌بار در آگوست ۲۰۲۶ به‌روزرسانی شده (هشریت واقعی شبکه معمولاً کمی بیشتر از این است)
         private const val FALLBACK_NETWORK_HASHRATE_EH = 994.68
+
+        // فاصلهٔ بین هر دور کامل اسکن شبکه در حالت اسکنر پیوسته (برای پیدا کردن دستگاه‌های جدید)
+        private const val SCAN_LOOP_INTERVAL_MS = 20_000L
+
+        // فاصلهٔ رفرش خودکار آمار زندهٔ دستگاه‌های از قبل پیداشده (فن، دما، هش‌ریت و ...)
+        // این جدا از اسکن شبکه‌ست، پس حتی وقتی اسکنر خاموشه هم آمار دستگاه‌ها خودکار به‌روز می‌مونه
+        private const val MINER_LIVE_REFRESH_INTERVAL_MS = 12_000L
     }
 
     init {
@@ -73,6 +85,21 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
                 fetchNetworkHashrateOnce()
                 _lastPriceUpdate.value = System.currentTimeMillis()
                 delay(PRICE_REFRESH_INTERVAL_MS)
+            }
+        }
+
+        // رفرش دوره‌ای آمار زندهٔ دستگاه‌های پیداشده (فن، دما، هش‌ریت) تا کاربر مجبور نباشه
+        // دستی روی هر دستگاه دکمهٔ رفرش بزنه؛ مستقل از روشن یا خاموش بودن اسکنر اجرا می‌شه
+        viewModelScope.launch(Dispatchers.IO) {
+            while (true) {
+                delay(MINER_LIVE_REFRESH_INTERVAL_MS)
+                val ips = _miners.value.map { it.ip }
+                for (ip in ips) {
+                    val info = WhatsminerClient.queryMiner(ip)
+                    listMutex.withLock {
+                        _miners.value = _miners.value.map { if (it.ip == ip) info else it }
+                    }
+                }
             }
         }
     }
@@ -370,6 +397,10 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * اسکن پیوسته: با یک بار زدن، اسکنر روشن می‌مونه و هر چند ثانیه یک‌بار دوباره شبکه رو
+     * برای پیدا کردن دستگاه‌های جدید می‌گرده — تا وقتی که خود کاربر با stopScan() متوقفش کنه.
+     */
     fun startScan() {
         if (_isScanning.value) return
         _isScanning.value = true
@@ -377,32 +408,59 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
         _foundCount.value = 0
         _statusMessage.value = "در حال تشخیص شبکه وای‌فای..."
 
-        viewModelScope.launch(Dispatchers.IO) {
-            val subnetInfo = NetworkScanner.getLocalIPv4AndPrefix(getApplication())
-            if (subnetInfo == null) {
-                _statusMessage.value = "به شبکه وای‌فای متصل نیستید یا دسترسی به آن ممکن نیست"
-                _isScanning.value = false
-                return@launch
-            }
+        scanJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                var firstPass = true
+                while (isActive) {
+                    val subnetInfo = NetworkScanner.getLocalIPv4AndPrefix(getApplication())
+                    if (subnetInfo == null) {
+                        _statusMessage.value = "به شبکه وای‌فای متصل نیستید یا دسترسی به آن ممکن نیست"
+                        return@launch
+                    }
 
-            val (address, prefix) = subnetInfo
-            val hosts = NetworkScanner.buildHostListInSubnet(address, prefix)
-            _statusMessage.value = "در حال اسکن ${hosts.size} آدرس در شبکه محلی..."
+                    val (address, prefix) = subnetInfo
+                    val hosts = NetworkScanner.buildHostListInSubnet(address, prefix)
+                    _statusMessage.value = if (firstPass)
+                        "در حال اسکن ${hosts.size} آدرس در شبکه محلی..."
+                    else
+                        "اسکنر روشن است — در حال بررسی دوباره شبکه برای دستگاه‌های جدید..."
 
-            NetworkScanner.scanForMiners(hosts) { ip ->
-                val info = WhatsminerClient.queryMiner(ip)
-                listMutex.withLock {
-                    _miners.value = (_miners.value + info).sortedBy { it.ip }
-                    _foundCount.value = _miners.value.size
+                    NetworkScanner.scanForMiners(hosts) { ip ->
+                        val info = WhatsminerClient.queryMiner(ip)
+                        listMutex.withLock {
+                            val existing = _miners.value.toMutableList()
+                            val idx = existing.indexOfFirst { it.ip == ip }
+                            if (idx >= 0) existing[idx] = info else existing.add(info)
+                            _miners.value = existing.sortedBy { it.ip }
+                            _foundCount.value = _miners.value.size
+                        }
+                    }
+
+                    firstPass = false
+                    if (!isActive) break
+                    _statusMessage.value = if (_miners.value.isEmpty())
+                        "اسکنر روشن است — هیچ ماینری هنوز پیدا نشد، هر ${SCAN_LOOP_INTERVAL_MS / 1000} ثانیه دوباره بررسی می‌شود"
+                    else
+                        "اسکنر روشن است — ${_miners.value.size} دستگاه پیدا شد"
+
+                    delay(SCAN_LOOP_INTERVAL_MS)
                 }
+            } finally {
+                _isScanning.value = false
             }
-
-            _statusMessage.value = if (_miners.value.isEmpty())
-                "هیچ ماینری در شبکه پیدا نشد"
-            else
-                "اسکن کامل شد — ${_miners.value.size} دستگاه پیدا شد"
-            _isScanning.value = false
         }
+    }
+
+    /** توقف اسکن پیوسته با دکمه — دستگاه‌های پیداشده در لیست باقی می‌مونن. */
+    fun stopScan() {
+        val currentCount = _miners.value.size
+        scanJob?.cancel()
+        scanJob = null
+        _isScanning.value = false
+        _statusMessage.value = if (currentCount == 0)
+            "اسکن متوقف شد"
+        else
+            "اسکن متوقف شد — $currentCount دستگاه پیدا شد"
     }
 
     fun refreshMiner(ip: String) {
