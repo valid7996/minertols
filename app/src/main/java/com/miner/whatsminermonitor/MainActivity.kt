@@ -122,9 +122,18 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
         reachableMiners.sumOf { it.estimatedDailyBtc(networkEh) * price }
     }
 
+    var showCalculator by remember { mutableStateOf(false) }
+
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("مانیتور ماینرهای Whatsminer") })
+            TopAppBar(
+                title = { Text("مانیتور ماینرهای Whatsminer") },
+                actions = {
+                    IconButton(onClick = { showCalculator = true }) {
+                        Icon(Icons.Filled.Calculate, contentDescription = "محاسبه‌گر سود استخراج")
+                    }
+                }
+            )
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
@@ -189,6 +198,116 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
             }
         }
     }
+
+    if (showCalculator) {
+        ProfitCalculatorDialog(
+            liveBtcPriceUsdt = btcPriceUsdt,
+            liveUsdToToman = viewModel.usdToToman.collectAsState().value,
+            liveNetworkHashrateEh = networkEh,
+            onDismiss = { showCalculator = false }
+        )
+    }
+}
+
+// ==================================================================================
+// محاسبه‌گر سود استخراج (مستقل از دستگاه‌های اسکن‌شده) - هش‌ریت و کارمزد استخر دلخواه
+// را وارد کنید تا سود تخمینی با همان قیمت زندهٔ برنامه محاسبه شود.
+// فرمول (شامل کسر کارمزد استخر) از بررسی دقیق یک اپ مشابه استخراج و با چند مقدار تست عددی
+// تأیید شده: dailyBtc = (1 - fee/100) * (hashrate_THs / (networkHashrateEh * 1e6)) * 144 * 3.125
+// ==================================================================================
+@Composable
+fun ProfitCalculatorDialog(
+    liveBtcPriceUsdt: Double?,
+    liveUsdToToman: Long?,
+    liveNetworkHashrateEh: Double,
+    onDismiss: () -> Unit
+) {
+    var hashrateInput by remember { mutableStateOf("120") }
+    var feeInput by remember { mutableStateOf("2") }
+    var priceInput by remember { mutableStateOf(liveBtcPriceUsdt?.let { "%.0f".format(it) } ?: "") }
+
+    val hashrateThs = hashrateInput.toDoubleOrNull()?.takeIf { it > 0.0 }
+    val feePercent = (feeInput.toDoubleOrNull() ?: 0.0).coerceIn(0.0, 100.0)
+    val priceUsdt = priceInput.toDoubleOrNull()?.takeIf { it > 0.0 } ?: liveBtcPriceUsdt
+
+    val dailyBtc = hashrateThs?.let { ths ->
+        val gross = (ths / (liveNetworkHashrateEh * 1_000_000.0)) * 144.0 * 3.125
+        gross * (1.0 - feePercent / 100.0)
+    }
+    val dailyUsdt = dailyBtc?.let { btc -> priceUsdt?.let { price -> btc * price } }
+    val dailyToman = dailyUsdt?.let { usd -> liveUsdToToman?.let { rate -> (usd * rate).roundToLong() } }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("محاسبه‌گر سود استخراج") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "هش‌ریت و کارمزد استخر خودتان را وارد کنید؛ سود با قیمت زندهٔ فعلی محاسبه می‌شود (بدون احتساب هزینه برق)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = hashrateInput,
+                    onValueChange = { hashrateInput = it },
+                    label = { Text("هش‌ریت (TH/s)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = feeInput,
+                    onValueChange = { feeInput = it },
+                    label = { Text("کارمزد استخر (٪)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = priceInput,
+                    onValueChange = { priceInput = it },
+                    label = { Text("قیمت بیت‌کوین (USD)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    supportingText = { Text("پیش‌فرض از قیمت زندهٔ فعلی؛ قابل ویرایش دستی هم هست", style = MaterialTheme.typography.labelSmall) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                if (dailyBtc != null) {
+                    Text("سود روزانه", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    IncomeRow("بیت‌کوین", "%.8f".format(dailyBtc), Color(0xFFF7931A))
+                    dailyUsdt?.let { IncomeRow("دلار", "$%.2f".format(it), Color(0xFF4CAF50)) }
+                    dailyToman?.let { IncomeRow("تومان", formatToman(it) + " ت", Color(0xFF2196F3)) }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("سود ماهانه (۳۰ روز)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    IncomeRow("بیت‌کوین", "%.8f".format(dailyBtc * 30), Color(0xFFF7931A))
+                    dailyUsdt?.let { IncomeRow("دلار", "$%.2f".format(it * 30), Color(0xFF4CAF50)) }
+                    dailyToman?.let { IncomeRow("تومان", formatToman(it * 30) + " ت", Color(0xFF2196F3)) }
+                } else {
+                    Text(
+                        "یک هش‌ریت معتبر (بزرگ‌تر از صفر) وارد کنید",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+
+                Text(
+                    "* بدون احتساب هزینه برق. فرمول و مقدار پیش‌فرض کارمزد (۲٪) از یک محاسبه‌گر مشابه گرفته شده.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("بستن") }
+        }
+    )
 }
 
 @Composable

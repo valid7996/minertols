@@ -69,11 +69,18 @@ data class MinerInfo(
     // فرمول: (hashrate_TH/s / network_hashrate_TH/s) * block_reward * blocks_per_day
     // networkHashrateEh باید ترجیحاً از MinerViewModel.networkHashrateEh (که زنده از mempool.space /
     // blockchain.info گرفته می‌شود) بیاید؛ عدد ۹۹۴.۶۸ فقط مقدار پیش‌فرضِ آخرین‌راه‌حل است - دقیقاً
-    // همان مقداری که یک اپ مشابه (MinerTools) در نسخهٔ فعلی‌اش برای هشریت شبکه استفاده می‌کند
-    fun estimatedDailyBtc(networkHashrateEh: Double = 994.68): Double {
+    // همان مقداری که یک اپ مشابه (MinerTools) در نسخهٔ فعلی‌اش برای هشریت شبکه استفاده می‌کند.
+    //
+    // feePercent: کارمزد استخر (٪) - این تخمین خودکار برای هر دستگاه پیش‌فرض بدون کارمزد است
+    // (دقیقاً مثل اپ مرجع که تخمین خودکار داشبورد هم کارمزد را حساب نمی‌کند و فقط محاسبه‌گر
+    // دستیِ جداگانه‌اش این گزینه را دارد؛ فرمول finalFee = (1 - fee/100) * gross هم از همان
+    // اپ استخراج و تأیید شده است)
+    fun estimatedDailyBtc(networkHashrateEh: Double = 994.68, feePercent: Double = 0.0): Double {
         val ths = ghsAverageThs ?: totalHashrateThs ?: return 0.0
         // blocks per day ~= 144, reward = 3.125 BTC
         // income = (ths / (networkHashrateEh * 1_000_000)) * 144 * 3.125
-        return (ths / (networkHashrateEh * 1_000_000.0)) * 144.0 * 3.125
+        val gross = (ths / (networkHashrateEh * 1_000_000.0)) * 144.0 * 3.125
+        val feeFactor = 1.0 - feePercent.coerceIn(0.0, 100.0) / 100.0
+        return gross * feeFactor
     }
 }
