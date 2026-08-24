@@ -664,7 +664,10 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
 
     var showRebootConfirm by remember { mutableStateOf(false) }
     var showPoolPicker by remember { mutableStateOf(false) }
-    var poolPendingConfirm by remember { mutableStateOf<PoolProfile?>(null) }
+    // مرحله اول بعد از انتخاب پروفایل پول: گرفتن Worker و رمز پول از کاربر
+    var poolCredentialsPending by remember { mutableStateOf<PoolProfile?>(null) }
+    // مرحله دوم: تایید نهایی با اطلاعاتی که کاربر وارد کرده
+    var poolPendingConfirm by remember { mutableStateOf<PendingPoolSwitch?>(null) }
     var showPasswordDialog by remember { mutableStateOf(false) }
     var pendingAction by remember { mutableStateOf<PendingPrivilegedAction?>(null) }
     var isBusy by remember { mutableStateOf(false) }
@@ -674,16 +677,15 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
         val password = CredentialsStore.getPassword(context, ipAddr)
         val username = CredentialsStore.DEFAULT_USERNAME
 
-        fun poolEntries(profile: PoolProfile): List<PoolEntry> {
-            val workerName = miner?.poolWorkerName?.takeIf { it.isNotBlank() } ?: "worker1"
-            return profile.addresses.map { PoolEntry(url = it, worker = workerName) }
-        }
+        // Worker و رمز پول همانی است که کاربر در دیالوگ «اطلاعات پول» وارد کرده (پسورد خالی -> "123")
+        fun poolEntries(switchAction: PendingPrivilegedAction.SwitchPool): List<PoolEntry> =
+            switchAction.profile.addresses.map { PoolEntry(url = it, worker = switchAction.workerName, pass = switchAction.poolPassword) }
 
         // روش اول: پنل وب مدیریت دستگاه (LuCI روی HTTPS) - طبق بررسی یک اپ مشابه که واقعاً روی
         // دستگاه‌های واقعی کار می‌کند، این همان راهی است که ریبوت/تغییر پول واقعاً از آن انجام می‌شود
         val luciResult: LuciMinerClient.LuciResult = when (action) {
             is PendingPrivilegedAction.Reboot -> LuciMinerClient.reboot(ipAddr, username, password)
-            is PendingPrivilegedAction.SwitchPool -> LuciMinerClient.updatePools(ipAddr, username, password, poolEntries(action.profile))
+            is PendingPrivilegedAction.SwitchPool -> LuciMinerClient.updatePools(ipAddr, username, password, poolEntries(action))
         }
 
         var success = luciResult.success
@@ -694,7 +696,7 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
         if (!success && !wrongPassword) {
             val tcpResult: PrivilegedResult = when (action) {
                 is PendingPrivilegedAction.Reboot -> WhatsminerClient.reboot(ipAddr, password)
-                is PendingPrivilegedAction.SwitchPool -> WhatsminerClient.updatePools(ipAddr, password, poolEntries(action.profile))
+                is PendingPrivilegedAction.SwitchPool -> WhatsminerClient.updatePools(ipAddr, password, poolEntries(action))
             }
             if (tcpResult.success) {
                 success = true
@@ -972,7 +974,7 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
         )
     }
 
-    // ===== دیالوگ انتخاب پروفایل پول =====
+    // ===== دیالوگ انتخاب پروفایل پول (قسمت اول) =====
     if (showPoolPicker) {
         AlertDialog(
             onDismissRequest = { showPoolPicker = false },
@@ -983,7 +985,7 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                         TextButton(
                             onClick = {
                                 showPoolPicker = false
-                                poolPendingConfirm = profile
+                                poolCredentialsPending = profile
                             },
                             modifier = Modifier.fillMaxWidth()
                         ) {
@@ -1005,22 +1007,92 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
         )
     }
 
-    // ===== دیالوگ تایید تغییر پول (هشدار) =====
-    poolPendingConfirm?.let { profile ->
+    // ===== دیالوگ Worker و رمز پول (قسمت دوم - بعد از انتخاب پول) =====
+    poolCredentialsPending?.let { profile ->
+        var workerInput by remember(profile) { mutableStateOf(miner.poolWorkerName ?: "") }
+        var passwordInput by remember(profile) { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { poolCredentialsPending = null },
+            title = { Text("اطلاعات پول «${profile.displayName}»") },
+            text = {
+                Column {
+                    Text(
+                        "Worker و رمز پول را وارد کنید:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = workerInput,
+                        onValueChange = { workerInput = it },
+                        label = { Text("Pool1 Worker") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = passwordInput,
+                        onValueChange = { passwordInput = it },
+                        label = { Text("Pool1 Password") },
+                        placeholder = { Text("خالی = پیش‌فرض 123") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        "اگر رمز پول را خالی بگذارید، به‌صورت پیش‌فرض «123» تنظیم می‌شود.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val worker = workerInput.trim()
+                        val pass = passwordInput.trim().ifBlank { "123" }
+                        poolCredentialsPending = null
+                        poolPendingConfirm = PendingPoolSwitch(profile = profile, workerName = worker, poolPassword = pass)
+                    },
+                    enabled = workerInput.isNotBlank()
+                ) { Text("بعدی") }
+            },
+            dismissButton = {
+                TextButton(onClick = { poolCredentialsPending = null }) { Text("انصراف") }
+            }
+        )
+    }
+
+    // ===== دیالوگ تایید تغییر پول (هشدار نهایی) =====
+    poolPendingConfirm?.let { pending ->
         AlertDialog(
             onDismissRequest = { poolPendingConfirm = null },
             icon = { Icon(Icons.Filled.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
             title = { Text("توجه: تغییر پول ماینینگ") },
             text = {
-                Text(
-                    "با تایید این عملیات، پول ماینینگ این دستگاه فوراً به «${profile.displayName}» تغییر می‌کند و ماینینگ فعلی قطع و به پول جدید متصل می‌شود. آیا موافقید؟"
-                )
+                Column {
+                    Text(
+                        "با تایید این عملیات، پول ماینینگ این دستگاه فوراً به «${pending.profile.displayName}» تغییر می‌کند و ماینینگ فعلی قطع و به پول جدید متصل می‌شود."
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Worker: ${pending.workerName}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                    Text("Password: ${pending.poolPassword}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val p = profile
+                    val p = pending
                     poolPendingConfirm = null
-                    scope.launch { runPrivileged(PendingPrivilegedAction.SwitchPool(p), miner.ip) }
+                    scope.launch {
+                        runPrivileged(
+                            PendingPrivilegedAction.SwitchPool(
+                                profile = p.profile,
+                                workerName = p.workerName,
+                                poolPassword = p.poolPassword
+                            ),
+                            miner.ip
+                        )
+                    }
                 }) { Text("بله، تغییر بده", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
@@ -1073,8 +1145,11 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
 
 private sealed class PendingPrivilegedAction {
     object Reboot : PendingPrivilegedAction()
-    data class SwitchPool(val profile: PoolProfile) : PendingPrivilegedAction()
+    data class SwitchPool(val profile: PoolProfile, val workerName: String, val poolPassword: String) : PendingPrivilegedAction()
 }
+
+/** اطلاعاتی که کاربر در دیالوگ «Pool1 Worker / Pool1 Password» وارد کرده، تا دیالوگ تایید نهایی نشانش دهد */
+private data class PendingPoolSwitch(val profile: PoolProfile, val workerName: String, val poolPassword: String)
 
 @Composable
 fun DetailField(label: String, value: String, modifier: Modifier = Modifier) {

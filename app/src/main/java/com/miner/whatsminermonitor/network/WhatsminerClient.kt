@@ -95,45 +95,74 @@ object WhatsminerClient {
         return result
     }
 
+    // بعضی مدل‌ها/فریمورها قبل یا بعد از JSON اصلی کاراکترهای اضافه (بنر، echo، بایت‌های ناقص)
+    // برمی‌گردانند؛ اگر پارس مستقیم شکست بخورد، به‌جای رد کردن کل پاسخ، زیررشتهٔ بین اولین '{' و
+    // آخرین '}' هم امتحان می‌شود - این باعث می‌شود مدل‌های بیشتری به‌درستی شناسایی شوند
+    private fun parseJsonLenient(raw: String): JSONObject? {
+        val direct = runCatching { JSONObject(raw) }.getOrNull()
+        if (direct != null) return direct
+        val start = raw.indexOf('{')
+        val end = raw.lastIndexOf('}')
+        if (start in 0 until end) {
+            return runCatching { JSONObject(raw.substring(start, end + 1)) }.getOrNull()
+        }
+        return null
+    }
+
     // ================= دستورهای خواندنی (Readable API) =================
+    //
+    // همهٔ دستورهای زیر با یک‌بار تلاش مجدد (سیاست همان چیزی که قبلاً فقط برای get_error_code
+    // استفاده می‌شد) اجرا می‌شوند: چون این‌ها همه بخشی از یک زنجیرهٔ ۷-۸ اتصال TCP پشت‌سرهم هستند
+    // و روی بعضی مدل‌ها/فریمورها (مخصوصاً مدل‌های کندتر یا زیر بار زیاد) ممکن است یکی-دو مورد وسط
+    // زنجیره بی‌پاسخ بماند - در حالی که خود دستگاه کاملاً یک Whatsminer سالم است. همین موضوع باعث
+    // می‌شد بعضی دستگاه‌ها فقط دما/چیپ (از summary و devs) را نشان دهند و بقیهٔ جزئیات (فریمور،
+    // مدل، کنترل‌برد، MAC، پاور) خالی بماند.
 
     suspend fun fetchSummary(ip: String): JSONObject? {
-        val raw = sendRawCommand(ip, """{"cmd":"summary"}""") ?: return null
-        return runCatching { JSONObject(raw) }.getOrNull()
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"summary"}""", retries = 1) ?: return null
+        return parseJsonLenient(raw)
     }
 
     suspend fun fetchDevs(ip: String): JSONObject? {
-        val raw = sendRawCommand(ip, """{"cmd":"devs"}""") ?: return null
-        return runCatching { JSONObject(raw) }.getOrNull()
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"devs"}""", retries = 1) ?: return null
+        return parseJsonLenient(raw)
     }
 
     // نسخه فریمور و پلتفرم دستگاه
     suspend fun fetchVersion(ip: String): JSONObject? {
-        val raw = sendRawCommand(ip, """{"cmd":"get_version"}""") ?: return null
-        return runCatching { JSONObject(raw) }.getOrNull()
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_version"}""", retries = 1) ?: return null
+        return parseJsonLenient(raw)
+    }
+
+    // نسخهٔ استاندارد دستور "version" (پروتکل پایهٔ cgminer که Whatsminer هم روی آن ساخته شده)؛
+    // به‌عنوان پشتیبان وقتی get_version چیزی برنمی‌گرداند - بعضی فریمورها/مدل‌ها فقط به این
+    // فرمت پاسخ می‌دهند و مدل/فریمور را زیر کلیدهای دیگری (VERSION[0].Type / .Miner) برمی‌گردانند
+    suspend fun fetchVersionStandard(ip: String): JSONObject? {
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"version"}""", retries = 1) ?: return null
+        return parseJsonLenient(raw)
     }
 
     // جزئیات هش‌برد؛ شامل مدل دقیق دستگاه (مثلاً M31S+VE40)
     suspend fun fetchDevDetails(ip: String): JSONObject? {
-        val raw = sendRawCommand(ip, """{"cmd":"devdetails"}""") ?: return null
-        return runCatching { JSONObject(raw) }.getOrNull()
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"devdetails"}""", retries = 1) ?: return null
+        return parseJsonLenient(raw)
     }
 
     // اطلاعات منبع تغذیه (پاور)
     suspend fun fetchPsu(ip: String): JSONObject? {
-        val raw = sendRawCommand(ip, """{"cmd":"get_psu"}""") ?: return null
-        return runCatching { JSONObject(raw) }.getOrNull()
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_psu"}""", retries = 1) ?: return null
+        return parseJsonLenient(raw)
     }
 
     // اطلاعات شبکه (از جمله MAC)
     suspend fun fetchMinerInfo(ip: String): JSONObject? {
-        val raw = sendRawCommand(ip, """{"cmd":"get_miner_info","info":"mac,ip,hostname"}""") ?: return null
-        return runCatching { JSONObject(raw) }.getOrNull()
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_miner_info","info":"mac,ip,hostname"}""", retries = 1) ?: return null
+        return parseJsonLenient(raw)
     }
 
     suspend fun fetchPools(ip: String): JSONObject? {
-        val raw = sendRawCommand(ip, """{"cmd":"pools"}""") ?: return null
-        return runCatching { JSONObject(raw) }.getOrNull()
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"pools"}""", retries = 1) ?: return null
+        return parseJsonLenient(raw)
     }
 
     // فهرست کدهای خطای فعال دستگاه؛ چون این دستور معمولا آخرین دستور در چرخهٔ خواندن اطلاعات یک
@@ -141,7 +170,7 @@ object WhatsminerClient {
     // به‌کندی/ناپایدار پاسخ می‌دهند، در صورت شکست یک‌بار دیگر با کمی مکث تلاش می‌شود
     suspend fun fetchErrorCode(ip: String): JSONObject? {
         val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_error_code"}""", retries = 1) ?: return null
-        return runCatching { JSONObject(raw) }.getOrNull()
+        return parseJsonLenient(raw)
     }
 
     suspend fun queryMiner(ip: String): MinerInfo {
@@ -194,25 +223,44 @@ object WhatsminerClient {
         // زمان پاسخ پول
         val poolResponseMs = poolObj?.let { findInt(it, listOf("Last Share Time")) }
 
+        // فریمور / کنترل‌برد / مدل: کلیدهای بیشتری امتحان می‌شوند چون نام آن‌ها بین مدل‌ها و
+        // نسخه‌های فریمور مختلف Whatsminer (M2x/M3x/M5x/M6x و...) کمی فرق دارد. اگر get_version
+        // چیزی برنگرداند، دستور استاندارد "version" هم به‌عنوان پشتیبان امتحان می‌شود
+        var fwVer = findString(versionMsg, listOf("fw_ver", "FWVersion", "fwversion", "BTMiner Version", "miner_version"))
+        var platform = findString(versionMsg, listOf("platform", "Platform", "control_board", "Board"))
+        var modelFromVersion = findString(versionMsg, listOf("prod", "miner_type", "Model", "type"))
+        if (fwVer == null || platform == null || modelFromVersion == null) {
+            val stdVersionObj = firstArrayObject(fetchVersionStandard(ip), "VERSION")
+            if (stdVersionObj != null) {
+                if (fwVer == null) fwVer = findString(stdVersionObj, listOf("Miner", "BMMiner", "CompileTime"))
+                if (platform == null) platform = findString(stdVersionObj, listOf("Platform", "platform"))
+                if (modelFromVersion == null) modelFromVersion = findString(stdVersionObj, listOf("Type", "Model"))
+            }
+        }
+
+        val minerType = findString(devDetailsObj, listOf("Model", "model", "Type"))
+            ?: modelFromVersion
+            ?: findString(summaryObj, listOf("Type", "Model"))
+
         return MinerInfo(
             ip = ip,
             isReachable = true,
             elapsedSeconds = findLong(summaryObj, listOf("Elapsed")),
             fanSpeedIn = findInt(summaryObj, listOf("Fan Speed In")),
             fanSpeedOut = findInt(summaryObj, listOf("Fan Speed Out")),
-            powerWatt = findInt(summaryObj, listOf("Power")),
-            averageTemperature = avgTemp ?: findDouble(summaryObj, listOf("Temperature")),
+            powerWatt = findInt(summaryObj, listOf("Power", "Power Current", "Power Real")),
+            averageTemperature = avgTemp ?: findDouble(summaryObj, listOf("Temperature", "Temp")),
             totalHashrateGhs = totalHashrate,
             ghsAverage = ghsAv,
-            firmwareVersion = findString(versionMsg, listOf("fw_ver")),
-            minerType = findString(devDetailsObj, listOf("Model")),
-            controlBoard = findString(versionMsg, listOf("platform")),
+            firmwareVersion = fwVer,
+            minerType = minerType,
+            controlBoard = platform,
             accepted = findInt(summaryObj, listOf("Accepted")),
             rejected = findInt(summaryObj, listOf("Rejected")),
             poolResponseMs = poolResponseMs,
             hashboards = hashboards,
-            macAddress = findString(minerInfoMsg, listOf("mac")),
-            powerSupplyModel = findString(psuMsg, listOf("name", "model")),
+            macAddress = findString(minerInfoMsg, listOf("mac", "Mac", "MAC", "macaddr")),
+            powerSupplyModel = findString(psuMsg, listOf("name", "model", "Model", "psu_model", "PSU Model")),
             poolWorkerName = findString(poolObj, listOf("User")),
             poolUrl = findString(poolObj, listOf("URL")),
             errorCodes = errorCodes,
@@ -308,11 +356,11 @@ object WhatsminerClient {
             list.add(
                 HashboardInfo(
                     id = id,
-                    temperaturePcb = findDouble(dev, listOf("Temperature")),
-                    temperatureChip = findDouble(dev, listOf("Chip Temp Avg")),
+                    temperaturePcb = findDouble(dev, listOf("Temperature", "Temp PCB", "Board Temp")),
+                    temperatureChip = findDouble(dev, listOf("Chip Temp Avg", "Temperature Chip", "Chip Temp")),
                     hashrateGhs = hashGhs,
-                    frequencyMhz = findDouble(dev, listOf("Chip Frequency")),
-                    effectiveChips = findInt(dev, listOf("Effective Chips")),
+                    frequencyMhz = findDouble(dev, listOf("Chip Frequency", "Frequency")),
+                    effectiveChips = findInt(dev, listOf("Effective Chips", "Chip Num", "ChipNum", "Chips")),
                     status = findString(dev, listOf("Status", "Enabled"))
                 )
             )
