@@ -95,9 +95,13 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
                 delay(MINER_LIVE_REFRESH_INTERVAL_MS)
                 val ips = _miners.value.map { it.ip }
                 for (ip in ips) {
-                    val info = WhatsminerClient.queryMiner(ip)
-                    listMutex.withLock {
-                        _miners.value = _miners.value.map { if (it.ip == ip) info else it }
+                    try {
+                        val info = WhatsminerClient.queryMiner(ip)
+                        listMutex.withLock {
+                            _miners.value = _miners.value.map { if (it.ip == ip) info else it }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("MinerViewModel", "live refresh exception for $ip", e)
                     }
                 }
             }
@@ -426,13 +430,29 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
                         "اسکنر روشن است — در حال بررسی دوباره شبکه برای دستگاه‌های جدید..."
 
                     NetworkScanner.scanForMiners(hosts) { ip ->
-                        val info = WhatsminerClient.queryMiner(ip)
-                        listMutex.withLock {
-                            val existing = _miners.value.toMutableList()
-                            val idx = existing.indexOfFirst { it.ip == ip }
-                            if (idx >= 0) existing[idx] = info else existing.add(info)
-                            _miners.value = existing.sortedBy { it.ip }
-                            _foundCount.value = _miners.value.size
+                        try {
+                            val info = WhatsminerClient.queryMiner(ip)
+                            listMutex.withLock {
+                                val existing = _miners.value.toMutableList()
+                                val idx = existing.indexOfFirst { it.ip == ip }
+                                if (idx >= 0) existing[idx] = info else existing.add(info)
+                                _miners.value = existing.sortedBy { it.ip }
+                                _foundCount.value = _miners.value.size
+                            }
+                            if (!info.isReachable) {
+                                android.util.Log.w("MinerViewModel", "miner at $ip reachable but query returned isReachable=false: ${info.errorMessage}")
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("MinerViewModel", "queryMiner exception for $ip", e)
+                            // Add placeholder so user sees device was found but data failed;  will be refreshed in next loop
+                            val fallback = com.miner.whatsminermonitor.model.MinerInfo(ip = ip, isReachable = false, errorMessage = "خطا در خواندن اطلاعات: ${e.message}")
+                            listMutex.withLock {
+                                val existing = _miners.value.toMutableList()
+                                val idx = existing.indexOfFirst { it.ip == ip }
+                                if (idx >= 0) existing[idx] = fallback else existing.add(fallback)
+                                _miners.value = existing.sortedBy { it.ip }
+                                _foundCount.value = _miners.value.size
+                            }
                         }
                     }
 
@@ -465,9 +485,13 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshMiner(ip: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val info = WhatsminerClient.queryMiner(ip)
-            listMutex.withLock {
-                _miners.value = _miners.value.map { if (it.ip == ip) info else it }
+            try {
+                val info = WhatsminerClient.queryMiner(ip)
+                listMutex.withLock {
+                    _miners.value = _miners.value.map { if (it.ip == ip) info else it }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("MinerViewModel", "refreshMiner exception for $ip", e)
             }
         }
     }
