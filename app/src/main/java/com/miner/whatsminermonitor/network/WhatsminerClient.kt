@@ -406,10 +406,14 @@ object WhatsminerClient {
             ?: summaryRoot.optJSONObject("SUMMARY")
             ?: summaryRoot.optJSONObject("summary")
             ?: findObjectCaseInsensitive(summaryRoot, "summary")
+            ?: summaryRoot.optJSONObject("Msg")
+            ?: summaryRoot.optJSONObject("msg")
+            ?: findObjectCaseInsensitive(summaryRoot, "Msg")
+            ?: findObjectCaseInsensitive(summaryRoot, "msg")
         if (summaryObj == null) {
-            Log.w(TAG, "queryMiner: SUMMARY object not found ip=$ip keys=${summaryRoot.keys().asSequence().toList()}")
+            Log.w(TAG, "queryMiner: SUMMARY object not found ip=$ip keys=${summaryRoot.keys().asSequence().toList()} rawPreview=${summaryRoot.toString().take(300)}")
         } else {
-            Log.d(TAG, "queryMiner SUMMARY keys ip=$ip ${summaryObj.keys().asSequence().toList().joinToString()}")
+            Log.d(TAG, "queryMiner SUMMARY keys ip=$ip ${summaryObj.keys().asSequence().toList().joinToString()} rawPreview=${summaryObj.toString().take(400)}")
         }
 
         // جمع‌آوری بقیه endpointها با تاخیر کوتاه
@@ -731,9 +735,18 @@ object WhatsminerClient {
         val list = mutableListOf<HashboardInfo>()
         for (i in 0 until devsArray.length()) {
             val dev = devsArray.optJSONObject(i) ?: continue
-            val id = findInt(dev, listOf("ASC", "ID", "PGA", "GPU", "GHS ID", "Board ID")) ?: i
-            val hashGhsRaw = findDouble(dev, listOf("MHS 5s", "MHS 5s (MHS)", "MHS av", "GHS 5s", "GHS av", "MHS 5s", "mhs 5s", "ghs 5s", "MHS5s", "Hash Rate"))
-            val hashGhs = hashGhsRaw?.let { v -> if (v > 1_000_000) v / 1000.0 else v }
+            val id = findInt(dev, listOf("ASC", "ID", "PGA", "GPU", "GHS ID", "Board ID", "Slot")) ?: i
+            // For DEVS: newer firmware (2025, H616/H32) reports 30-40 with key MHS av but value is TH/s (e.g., 35.57 -> 35.57 TH/s)
+            // Older firmware reports 35M (e.g., 35570000 MH/s). Heuristic: <5000 => TH/s*1000, >1M => MH/s/1000
+            val hashGhsRaw = findDouble(dev, listOf("MHS 5s", "MHS 5s (MHS)", "MHS av", "MHS 5m", "MHS 1m", "MHS 15m", "HS RT", "GHS 5s", "GHS av", "MHS 5s", "mhs 5s", "ghs 5s", "MHS5s", "Hash Rate", "hash-average", "hash-realtime"))
+            val hashGhs = hashGhsRaw?.let { v ->
+                when {
+                    v == 0.0 -> 0.0
+                    v < 5000 -> v * 1000.0 // TH/s -> GHS (new firmware: 35.57 TH/s)
+                    v > 1_000_000 -> v / 1000.0 // MH/s -> GHS (old firmware: 35570000 MH/s)
+                    else -> v // already GHS
+                }
+            }
             list.add(
                 HashboardInfo(
                     id = id,
