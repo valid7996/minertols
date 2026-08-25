@@ -3,6 +3,7 @@ package com.miner.whatsminermonitor.network
 import android.util.Base64
 import android.util.Log
 import com.miner.whatsminermonitor.model.HashboardInfo
+import com.miner.whatsminermonitor.model.MinerDiagnostics
 import com.miner.whatsminermonitor.model.MinerInfo
 import com.miner.whatsminermonitor.model.PoolEntry
 import kotlinx.coroutines.Dispatchers
@@ -44,27 +45,37 @@ private data class TokenInfo(val time: String, val salt: String, val newSalt: St
 object WhatsminerClient {
 
     const val API_PORT = 4028
+    const val API_PORT_V3 = 4433
     private const val CONNECT_TIMEOUT_MS = 3500
     private const val READ_TIMEOUT_MS = 4000
     private const val TAG = "WhatsminerClient"
 
-    suspend fun isPortOpen(ip: String, timeoutMs: Int = 800): Boolean = withContext(Dispatchers.IO) {
+    suspend fun isPortOpen(ip: String, timeoutMs: Int = 800, port: Int = API_PORT): Boolean = withContext(Dispatchers.IO) {
         // تلاش با تایم‌اوت کمی بیشتر؛ دستگاه‌های زیر بار ممکن است 400ms را پاسخ ندهند
         try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(ip, API_PORT), timeoutMs)
+                socket.connect(InetSocketAddress(ip, port), timeoutMs)
                 true
             }
         } catch (e: Exception) {
-            Log.d(TAG, "isPortOpen failed ip=$ip timeout=${timeoutMs}ms err=${e.message}")
+            Log.d(TAG, "isPortOpen failed ip=$ip port=$port timeout=${timeoutMs}ms err=${e.message}")
             false
         }
     }
 
-    private suspend fun sendRawCommand(ip: String, command: String): String? = withContext(Dispatchers.IO) {
+    /**
+     * For scan: check both old (4028) and new (4433) ports. New API v3 (M50/M60/M60S) listens on 4433.
+     */
+    suspend fun isAnyPortOpen(ip: String, timeoutMs: Int = 800): Boolean {
+        if (isPortOpen(ip, timeoutMs, API_PORT)) return true
+        if (isPortOpen(ip, timeoutMs, API_PORT_V3)) return true
+        return false
+    }
+
+    private suspend fun sendRawCommand(ip: String, command: String, port: Int = API_PORT): String? = withContext(Dispatchers.IO) {
         try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(ip, API_PORT), CONNECT_TIMEOUT_MS)
+                socket.connect(InetSocketAddress(ip, port), CONNECT_TIMEOUT_MS)
                 socket.soTimeout = READ_TIMEOUT_MS
                 // Whatsminer/cgminer API expects newline-terminated JSON. Some firmwares ignore
                 // commands without trailing newline, causing silent no-response.
@@ -180,16 +191,17 @@ object WhatsminerClient {
         ip: String,
         command: String,
         retries: Int = 1,
-        delayMs: Long = 400
+        delayMs: Long = 400,
+        port: Int = API_PORT
     ): String? {
-        var result = sendRawCommand(ip, command)
+        var result = sendRawCommand(ip, command, port)
         // Treat blank/empty as failure as well
         if (result != null && result.isBlank()) result = null
         var attemptsLeft = retries
         while ((result == null || result.isBlank()) && attemptsLeft > 0) {
-            Log.d(TAG, "retry ip=$ip cmd=$command attemptsLeft=$attemptsLeft")
+            Log.d(TAG, "retry ip=$ip port=$port cmd=$command attemptsLeft=$attemptsLeft")
             delay(delayMs)
-            result = sendRawCommand(ip, command)
+            result = sendRawCommand(ip, command, port)
             if (result != null && result.isBlank()) result = null
             attemptsLeft--
         }
@@ -259,18 +271,27 @@ object WhatsminerClient {
     // مدل، کنترل‌برد، MAC، پاور) خالی بماند.
 
     suspend fun fetchSummary(ip: String): JSONObject? {
-        val raw = sendRawCommandWithRetry(ip, """{"cmd":"summary"}""", retries = 1) ?: return null
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"summary"}""", retries = 1)
+        if (raw == null) { MinerDiagnostics.recordRaw(ip, "summary", API_PORT, null, false, "no response"); return null }
+        val ok = parseJsonLenient(raw) != null
+        MinerDiagnostics.recordRaw(ip, "summary", API_PORT, raw, ok, if (!ok) "parse failed" else null)
         return parseJsonLenient(raw)
     }
 
     suspend fun fetchDevs(ip: String): JSONObject? {
-        val raw = sendRawCommandWithRetry(ip, """{"cmd":"devs"}""", retries = 1) ?: return null
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"devs"}""", retries = 1)
+        if (raw == null) { MinerDiagnostics.recordRaw(ip, "devs", API_PORT, null, false, "no response"); return null }
+        val ok = parseJsonLenient(raw) != null
+        MinerDiagnostics.recordRaw(ip, "devs", API_PORT, raw, ok, if (!ok) "parse failed" else null)
         return parseJsonLenient(raw)
     }
 
     // نسخه فریمور و پلتفرم دستگاه
     suspend fun fetchVersion(ip: String): JSONObject? {
-        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_version"}""", retries = 1) ?: return null
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_version"}""", retries = 1)
+        if (raw == null) { MinerDiagnostics.recordRaw(ip, "get_version", API_PORT, null, false, "no response"); return null }
+        val ok = parseJsonLenient(raw) != null
+        MinerDiagnostics.recordRaw(ip, "get_version", API_PORT, raw, ok, if (!ok) "parse failed" else null)
         return parseJsonLenient(raw)
     }
 
@@ -278,30 +299,65 @@ object WhatsminerClient {
     // به‌عنوان پشتیبان وقتی get_version چیزی برنمی‌گرداند - بعضی فریمورها/مدل‌ها فقط به این
     // فرمت پاسخ می‌دهند و مدل/فریمور را زیر کلیدهای دیگری (VERSION[0].Type / .Miner) برمی‌گردانند
     suspend fun fetchVersionStandard(ip: String): JSONObject? {
-        val raw = sendRawCommandWithRetry(ip, """{"cmd":"version"}""", retries = 1) ?: return null
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"version"}""", retries = 1)
+        if (raw == null) { MinerDiagnostics.recordRaw(ip, "version", API_PORT, null, false, "no response"); return null }
+        val ok = parseJsonLenient(raw) != null
+        MinerDiagnostics.recordRaw(ip, "version", API_PORT, raw, ok, if (!ok) "parse failed" else null)
         return parseJsonLenient(raw)
     }
 
     // جزئیات هش‌برد؛ شامل مدل دقیق دستگاه (مثلاً M31S+VE40)
     suspend fun fetchDevDetails(ip: String): JSONObject? {
-        val raw = sendRawCommandWithRetry(ip, """{"cmd":"devdetails"}""", retries = 1) ?: return null
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"devdetails"}""", retries = 1)
+        if (raw == null) { MinerDiagnostics.recordRaw(ip, "devdetails", API_PORT, null, false, "no response"); return null }
+        val ok = parseJsonLenient(raw) != null
+        MinerDiagnostics.recordRaw(ip, "devdetails", API_PORT, raw, ok, if (!ok) "parse failed" else null)
         return parseJsonLenient(raw)
     }
 
     // اطلاعات منبع تغذیه (پاور)
     suspend fun fetchPsu(ip: String): JSONObject? {
-        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_psu"}""", retries = 1) ?: return null
-        return parseJsonLenient(raw)
-    }
-
-    // اطلاعات شبکه (از جمله MAC)
-    suspend fun fetchMinerInfo(ip: String): JSONObject? {
-        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_miner_info","info":"mac,ip,hostname"}""", retries = 1) ?: return null
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_psu"}""", retries = 1)
+        if (raw == null) { MinerDiagnostics.recordRaw(ip, "get_psu", API_PORT, null, false, "no response"); return null }
+        val ok = parseJsonLenient(raw) != null
+        MinerDiagnostics.recordRaw(ip, "get_psu", API_PORT, raw, ok, if (!ok) "parse failed" else null)
         return parseJsonLenient(raw)
     }
 
     suspend fun fetchPools(ip: String): JSONObject? {
         val raw = sendRawCommandWithRetry(ip, """{"cmd":"pools"}""", retries = 1) ?: return null
+        MinerDiagnostics.recordRaw(ip, "pools", API_PORT, raw, parseJsonLenient(raw) != null)
+        return parseJsonLenient(raw)
+    }
+
+    // اطلاعات آماری گسترده (STATS) - بعضی فریمورها فقط اینجا hashrate/power/uptime را گزارش می‌کنند
+    suspend fun fetchStats(ip: String): JSONObject? {
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"stats"}""", retries = 1) ?: return null
+        MinerDiagnostics.recordRaw(ip, "stats", API_PORT, raw, parseJsonLenient(raw) != null)
+        return parseJsonLenient(raw)
+    }
+
+    // ========== API v3 (port 4433) - M50/M60/M60S new firmware ==========
+    // These use same TCP JSON but different port and commands: get.miner.status / get.device.info
+    suspend fun fetchMinerStatusV3(ip: String, param: String = "summary+pools+edevs"): JSONObject? {
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get.miner.status","param":"$param"}""", retries = 1, port = API_PORT_V3)
+        if (raw == null) {
+            MinerDiagnostics.recordRaw(ip, "v3-miner-status:$param", API_PORT_V3, null, false, "no response")
+            return null
+        }
+        val ok = parseJsonLenient(raw) != null
+        MinerDiagnostics.recordRaw(ip, "v3-miner-status:$param", API_PORT_V3, raw, ok)
+        return parseJsonLenient(raw)
+    }
+
+    suspend fun fetchDeviceInfoV3(ip: String): JSONObject? {
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get.device.info"}""", retries = 1, port = API_PORT_V3)
+        if (raw == null) {
+            MinerDiagnostics.recordRaw(ip, "v3-device-info", API_PORT_V3, null, false, "no response")
+            return null
+        }
+        val ok = parseJsonLenient(raw) != null
+        MinerDiagnostics.recordRaw(ip, "v3-device-info", API_PORT_V3, raw, ok)
         return parseJsonLenient(raw)
     }
 
@@ -309,96 +365,161 @@ object WhatsminerClient {
     // دستگاه است (بعد از ۷ اتصال دیگر) و دستگاه‌های Whatsminer گاهی به اتصال‌های پشت‌سرهم سریع
     // به‌کندی/ناپایدار پاسخ می‌دهند، در صورت شکست یک‌بار دیگر با کمی مکث تلاش می‌شود
     suspend fun fetchErrorCode(ip: String): JSONObject? {
-        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_error_code"}""", retries = 1) ?: return null
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_error_code"}""", retries = 1)
+        if (raw == null) { MinerDiagnostics.recordRaw(ip, "get_error_code", API_PORT, null, false, "no response"); return null }
+        val ok = parseJsonLenient(raw) != null
+        MinerDiagnostics.recordRaw(ip, "get_error_code", API_PORT, raw, ok, if (!ok) "parse failed" else null)
         return parseJsonLenient(raw)
     }
 
     suspend fun queryMiner(ip: String): MinerInfo {
+        // مرحله اول: جمع‌آوری همه پاسخ‌ها با fallback برای تشخیص reachability
         var summaryRoot = fetchSummary(ip)
-        // Fallback: some firmwares (especially M20S early, or devices under heavy load) may miss first
-        // summary but still respond to devs. Try one more quick fetch before marking unreachable.
+        var devsRoot: JSONObject? = null
+        var statsRoot: JSONObject? = null
+        var isPartialReachable = false
         if (summaryRoot == null) {
-            Log.w(TAG, "queryMiner: summary null ip=$ip, trying devs as fallback before marking unreachable")
-            val devsFallback = fetchDevs(ip)
-            if (devsFallback != null) {
-                // Device is reachable, but summary failed. Create a synthetic summaryRoot so we can still show partial data.
-                Log.w(TAG, "queryMiner: devs responded but summary did not ip=$ip -> partial reachable")
+            Log.w(TAG, "queryMiner: summary null ip=$ip, trying devs/stats as fallback before marking unreachable")
+            devsRoot = fetchDevs(ip)
+            statsRoot = fetchStats(ip)
+            if (devsRoot != null || statsRoot != null) {
+                Log.w(TAG, "queryMiner: devs/stats responded but summary did not ip=$ip -> partial reachable")
                 summaryRoot = JSONObject().apply { put("SUMMARY", JSONArray().apply { put(JSONObject()) }) }
-                // We will fill summaryObj from devsFallback-derived placeholder; hashboards will still be parsed below
+                isPartialReachable = true
             } else {
-                Log.w(TAG, "queryMiner: both summary and devs null ip=$ip -> unreachable")
+                Log.w(TAG, "queryMiner: summary, devs and stats all null ip=$ip -> unreachable")
                 return MinerInfo(ip = ip, isReachable = false, errorMessage = "پاسخی از دستگاه دریافت نشد")
             }
         }
 
         val summaryObj = firstArrayObject(summaryRoot, "SUMMARY")
             ?: findObjectCaseInsensitive(summaryRoot, "SUMMARY")
-            ?: summaryRoot.optJSONObject("SUMMARY") // fallback if it's object not array
+            ?: summaryRoot.optJSONObject("SUMMARY")
+            ?: summaryRoot.optJSONObject("summary")
+            ?: findObjectCaseInsensitive(summaryRoot, "summary")
         if (summaryObj == null) {
             Log.w(TAG, "queryMiner: SUMMARY object not found ip=$ip keys=${summaryRoot.keys().asSequence().toList()}")
+        } else {
+            Log.d(TAG, "queryMiner SUMMARY keys ip=$ip ${summaryObj.keys().asSequence().toList().joinToString()}")
         }
-        // بین اتصال‌های پشت‌سرهم TCP یک مکث کوتاه گذاشته می‌شود؛ چون دستگاه Whatsminer روی یک
-        // پورت با ظرفیت محدود پاسخ می‌دهد، ارسال پشت‌سرهم و بدون فاصلهٔ ۸ دستور جدا می‌تواند باعث
-        // شود آخرین دستورها (از جمله get_error_code) گاهی بی‌پاسخ بمانند
-        delay(80)
-        val devsRoot = fetchDevs(ip)
+
+        // جمع‌آوری بقیه endpointها با تاخیر کوتاه
+        delay(70)
+        if (devsRoot == null) devsRoot = fetchDevs(ip)
         val devsArray = getArrayCaseInsensitive(devsRoot, "DEVS")
-        if (devsRoot != null && devsArray == null) Log.d(TAG, "DEVS array not found ip=$ip")
-        delay(80)
+            ?: getArrayCaseInsensitive(devsRoot, "devs")
+        if (devsRoot != null && devsArray == null) Log.d(TAG, "DEVS array not found ip=$ip keys=${devsRoot.keys().asSequence().toList().joinToString()}")
+        else if (devsArray != null) Log.d(TAG, "DEVS found ip=$ip count=${devsArray.length()}")
+
+        delay(70)
+        if (statsRoot == null) statsRoot = fetchStats(ip)
+        val statsObj = firstArrayObject(statsRoot, "STATS")
+            ?: firstArrayObject(statsRoot, "Stats")
+            ?: findObjectCaseInsensitive(statsRoot, "STATS")
+            ?: statsRoot?.optJSONObject("STATS")
+            ?: statsRoot?.optJSONObject("Stats")
+        if (statsRoot != null) Log.d(TAG, "STATS ip=$ip available=${statsObj != null} keys=${statsObj?.keys()?.asSequence()?.toList()?.joinToString() ?: statsRoot.keys().asSequence().toList().joinToString()}")
+
+        delay(70)
         val versionRoot = fetchVersion(ip)
         val versionMsg = versionRoot?.optJSONObject("Msg") ?: versionRoot?.optJSONObject("msg") ?: findObjectCaseInsensitive(versionRoot, "Msg")
         if (versionRoot != null && versionMsg == null) Log.d(TAG, "version Msg not found ip=$ip rootKeys=${versionRoot.keys().asSequence().toList()}")
-        delay(80)
+
+        delay(70)
         val devDetailsRoot = fetchDevDetails(ip)
         val devDetailsObj = firstArrayObject(devDetailsRoot, "DEVDETAILS")
             ?: firstArrayObject(devDetailsRoot, "DevDetails")
             ?: findObjectCaseInsensitive(devDetailsRoot, "DEVDETAILS")
-        delay(80)
+
+        delay(70)
         val psuRoot = fetchPsu(ip)
         val psuMsg = psuRoot?.optJSONObject("Msg") ?: psuRoot?.optJSONObject("msg") ?: findObjectCaseInsensitive(psuRoot, "Msg")
-        delay(80)
+        if (psuRoot != null) Log.d(TAG, "PSU ip=$ip msgKeys=${psuMsg?.keys()?.asSequence()?.toList()?.joinToString() ?: psuRoot.keys().asSequence().toList().joinToString()}")
+
+        delay(70)
         val minerInfoRoot = fetchMinerInfo(ip)
         val minerInfoMsg = minerInfoRoot?.optJSONObject("Msg") ?: minerInfoRoot?.optJSONObject("msg") ?: findObjectCaseInsensitive(minerInfoRoot, "Msg")
-        delay(80)
+
+        delay(70)
         val poolsRoot = fetchPools(ip)
-        val poolObj = firstArrayObject(poolsRoot, "POOLS") ?: findObjectCaseInsensitive(poolsRoot, "POOLS")
-        delay(80)
+        val poolObj = firstArrayObject(poolsRoot, "POOLS") ?: firstArrayObject(poolsRoot, "Pools") ?: findObjectCaseInsensitive(poolsRoot, "POOLS")
+        val poolsArray = getArrayCaseInsensitive(poolsRoot, "POOLS") ?: getArrayCaseInsensitive(poolsRoot, "Pools")
+
+        // === API v3 (port 4433) for M50/M60/M60S new firmware ===
+        delay(70)
+        val v3StatusRoot = fetchMinerStatusV3(ip, "summary+pools+edevs")
+        val v3Msg = v3StatusRoot?.optJSONObject("msg") ?: v3StatusRoot?.optJSONObject("Msg") ?: findObjectCaseInsensitive(v3StatusRoot, "msg")
+        val v3Summary = v3Msg?.optJSONObject("summary") ?: findObjectCaseInsensitive(v3Msg, "summary")
+        val v3PoolsArray = v3Msg?.optJSONArray("pools") ?: findArrayCaseInsensitive(v3Msg ?: JSONObject(), "pools")
+        val v3EdevsArray = v3Msg?.optJSONArray("edevs") ?: findArrayCaseInsensitive(v3Msg ?: JSONObject(), "edevs")
+        if (v3StatusRoot != null) Log.d(TAG, "V3 status ip=$ip v3Summary=${v3Summary != null} v3Pools=${v3PoolsArray?.length() ?: 0} v3Edevs=${v3EdevsArray?.length() ?: 0}")
+        delay(70)
+        val v3DeviceInfoRoot = fetchDeviceInfoV3(ip)
+        val v3DeviceMsg = v3DeviceInfoRoot?.optJSONObject("msg") ?: v3DeviceInfoRoot?.optJSONObject("Msg") ?: findObjectCaseInsensitive(v3DeviceInfoRoot, "msg")
+        val v3PowerObj = v3DeviceMsg?.optJSONObject("power") ?: findObjectCaseInsensitive(v3DeviceMsg, "power")
+        val v3MinerObj = v3DeviceMsg?.optJSONObject("miner") ?: findObjectCaseInsensitive(v3DeviceMsg, "miner")
+        val v3SystemObj = v3DeviceMsg?.optJSONObject("system") ?: findObjectCaseInsensitive(v3DeviceMsg, "system")
+        if (v3DeviceInfoRoot != null) Log.d(TAG, "V3 deviceInfo ip=$ip power=${v3PowerObj != null} minerType=${v3MinerObj?.optString("type")}")
+
+        delay(70)
         val errorRoot = fetchErrorCode(ip)
         val errorCodes = parseErrorCodes(errorRoot)
-        // اگر errorRoot عملا null باشد یعنی دستور get_error_code اصلا پاسخ نگرفته (نه اینکه دستگاه
-        // واقعا خطایی نداشته)؛ این تفاوت را جدا نگه می‌داریم تا در UI به‌جای «سالم» به‌درستی «قابل بررسی نبود» نشان داده شود
-        val errorCheckFailed = errorRoot == null
+        // Also try v3 error-code as fallback (new API: msg.error-code = [{"531":"...","reason":"Slot1 not found."}])
+        val v3ErrorArr = v3DeviceMsg?.optJSONArray("error-code") ?: findArrayCaseInsensitive(v3DeviceMsg ?: JSONObject(), "error-code")
+        val v3ErrorCodes = if (v3ErrorArr != null) {
+            // v3 format is array of objects where key is code as string; our parseErrorCodes handles that if we wrap it
+            parseErrorCodes(JSONObject().apply { put("Msg", JSONObject().apply { put("error_code", v3ErrorArr) }) })
+        } else emptyList()
+        val allErrorCodes = (errorCodes + v3ErrorCodes).distinct()
+        // errorCheckFailed only if both old and v3 error sources unavailable
+        val errorCheckFailed = errorRoot == null && v3ErrorArr == null && v3DeviceInfoRoot == null
 
         val hashboards = parseHashboards(devsArray)
-        val avgTemp = hashboards.mapNotNull { it.temperaturePcb ?: it.temperatureChip }
+        // For v3, also try to build hashboards from edevs if DEVS empty
+        val v3Hashboards = if (hashboards.isEmpty() && v3EdevsArray != null) parseHashboardsV3(v3EdevsArray) else emptyList()
+        val effectiveHashboards = if (hashboards.isNotEmpty()) hashboards else v3Hashboards
+        val avgTemp = effectiveHashboards.mapNotNull { it.temperaturePcb ?: it.temperatureChip }
             .takeIf { it.isNotEmpty() }?.average()
+            ?: v3Summary?.let { findDouble(it, listOf("chip-temp-avg", "chip_temp_avg", "temperature")) }
 
-        // GHS 5s (لحظه‌ای) - مقدار خام از دستگاه به MH/s است؛ برای تبدیل به GH/s بر ۱۰۰۰ تقسیم می‌شود
-        // برخی فریمورها مقدار را به GH/s مستقیم یا با کلید متفاوت برمی‌گردانند
-        val totalHashrate = findDouble(summaryObj, listOf("MHS 5s", "MHS 5s (MHS)", "MHS 5s ", "GHS 5s", "GHS av", "MHS av", "GHS 5s", "HS 5s", "Hash Rate 5s", "MHS 5s", "mhs 5s", "ghs 5s", "MHS5s"))
-            ?.let { v ->
-                // Heuristic: if value > 1_000_000 then it's likely MH/s -> divide 1000; if < 10000 and we suspect GH/s, keep as is?
-                // Most Whatsminer return MH/s, but M50+ may return GH/s scaled differently. We detect: if original key was GHS, don't divide?
-                // For simplicity, if value > 200_000, assume MH/s (since GH/s for modern miners 100-200 TH = 100k-200k GH). MH/s would be 100M-200M.
-                if (v > 1_000_000) v / 1000.0 else v
-            }
-            ?: hashboards.mapNotNull { it.hashrateGhs }.takeIf { it.isNotEmpty() }?.sum()
+        // ============ 7 فیلد کلیدی با fallback چندسطحی + لاگ تشخیصی ============
 
-        // GHS av (میانگین) - مشابه بالا
-        val ghsAvRaw = findDouble(summaryObj, listOf("MHS av", "MHS Av", "GHS av", "GHS 5s", "MHS average", "mhs av", "ghs av"))
-        val ghsAv = ghsAvRaw?.let { v -> if (v > 1_000_000) v / 1000.0 else v }
+        // 1) Hashrate (TH/s -> GHS) - منبع: SUMMARY -> STATS -> V3 summary -> DEVS aggregate
+        val hashrateResult = resolveHashrate(ip, summaryObj, statsObj, v3Summary, devsArray, effectiveHashboards)
+        val totalHashrate = hashrateResult?.first
+        val ghsAvResult = resolveGhsAverage(ip, summaryObj, statsObj, v3Summary)
+        val ghsAv = ghsAvResult?.first
+
+        // 2) Uptime / Elapsed - try SUMMARY, STATS, V3 summary, device info
+        val elapsedResult = resolveElapsed(ip, summaryObj, statsObj, v3Summary, versionMsg)
+        val elapsedSeconds = elapsedResult?.first
+
+        // 3) Power (Watt) - try SUMMARY, STATS, V3 summary/power, PSU
+        val powerResult = resolvePower(ip, summaryObj, statsObj, v3Summary, psuMsg, psuRoot, v3PowerObj)
+        val powerWatt = powerResult?.first
+
+        // 4) Accepted shares - try SUMMARY, STATS, POOLS, V3 pools
+        val acceptedResult = resolveAccepted(ip, summaryObj, statsObj, poolObj, poolsArray, v3PoolsArray)
+        val accepted = acceptedResult?.first
+
+        // 5) Rejected shares - similar, but V3 pools have reject-rate not count
+        val rejectedResult = resolveRejected(ip, summaryObj, statsObj, poolObj, poolsArray, v3PoolsArray)
+        val rejected = rejectedResult?.first
+
+        // 6) Fan In / 7) Fan Out with array + key fallback including V3
+        val fanInResult = resolveFanSpeed(ip, summaryObj, statsObj, v3Summary, isInput = true)
+        val fanOutResult = resolveFanSpeed(ip, summaryObj, statsObj, v3Summary, isInput = false)
+        val fanSpeedIn = fanInResult?.first
+        val fanSpeedOut = fanOutResult?.first
 
         // زمان پاسخ پول
         val poolResponseMs = poolObj?.let { findInt(it, listOf("Last Share Time", "LastShareTime", "last_share_time", "Pool Rejected%")) }
 
-        // فریمور / کنترل‌برد / مدل: کلیدهای بیشتری امتحان می‌شوند چون نام آن‌ها بین مدل‌ها و
-        // نسخه‌های فریمور مختلف Whatsminer (M2x/M3x/M5x/M6x و...) کمی فرق دارد. اگر get_version
-        // چیزی برنگرداند، دستور استاندارد "version" هم به‌عنوان پشتیبان امتحان می‌شود
-        var fwVer = findString(versionMsg, listOf("fw_ver", "FWVersion", "fwversion", "BTMiner Version", "miner_version", "Firmware Version", "Version", "fw version", "CompileTime", "BMMiner", "Miner"))
-        var platform = findString(versionMsg, listOf("platform", "Platform", "control_board", "Board", "Control Board", "control board"))
-        var modelFromVersion = findString(versionMsg, listOf("prod", "miner_type", "Model", "type", "Type", "Miner Type", "miner type", "Model Name"))
+        // فریمور / کنترل‌برد / مدل
+        var fwVer = findStringWithSource(versionMsg, listOf("fw_ver", "FWVersion", "fwversion", "BTMiner Version", "miner_version", "Firmware Version", "Version", "fw version", "CompileTime", "BMMiner", "Miner"))?.first
+        var platform = findStringWithSource(versionMsg, listOf("platform", "Platform", "control_board", "Board", "Control Board", "control board"))?.first
+        var modelFromVersion = findStringWithSource(versionMsg, listOf("prod", "miner_type", "Model", "type", "Type", "Miner Type", "miner type", "Model Name"))?.first
         if (fwVer == null || platform == null || modelFromVersion == null) {
-            // Fetch once and reuse (previously called twice)
             val stdVersionRoot = fetchVersionStandard(ip)
             val stdVersionObj = firstArrayObject(stdVersionRoot, "VERSION")
                 ?: firstArrayObject(stdVersionRoot, "Version")
@@ -408,37 +529,96 @@ object WhatsminerClient {
                 if (platform == null) platform = findString(stdVersionObj, listOf("Platform", "platform", "Board"))
                 if (modelFromVersion == null) modelFromVersion = findString(stdVersionObj, listOf("Type", "Model", "model", "Miner Type"))
             }
-            // Also try direct keys in versionRoot itself (some firmwares put them at root Msg level with different casing)
             if (fwVer == null && versionRoot != null) fwVer = findString(versionRoot, listOf("fw_ver", "FWVersion"))
             if (platform == null && versionRoot != null) platform = findString(versionRoot, listOf("platform", "Platform"))
         }
 
+        // Try v3 fallback for model/firmware if still missing (new API: system.fwversion, platform, miner.type)
+        if (fwVer == null) fwVer = findString(v3SystemObj, listOf("fwversion", "fw_version", "version", "Firmware Version")) ?: findString(v3SystemObj, listOf("Version"))
+        if (platform == null) platform = findString(v3SystemObj, listOf("platform", "Platform", "control-board-version"))
+        if (modelFromVersion == null) modelFromVersion = findString(v3MinerObj, listOf("type", "Type", "model", "Model"))
         val minerType = findString(devDetailsObj, listOf("Model", "model", "Type", "type", "prod"))
             ?: modelFromVersion
             ?: findString(summaryObj, listOf("Type", "Model", "model", "Miner Type", "Description"))
+            ?: findString(v3MinerObj, listOf("type", "Type", "model"))
+
+        // ========== Diagnostic logging with 0 vs missing vs invalid vs error distinction ==========
+        fun recordFieldDiagnostics(field: String, result: Pair<*, String?>?, endpointForMissing: String, rawForMissing: String = "MISSING") {
+            if (result != null) {
+                val value = result.first
+                val isZero = (value is Number && value.toDouble() == 0.0) || value.toString() == "0"
+                val status = if (isZero) MinerDiagnostics.FieldResolution.Status.ZERO else MinerDiagnostics.FieldResolution.Status.OK
+                val rawStr = value.toString()
+                val finalStr = when (field) {
+                    "hashrate" -> "${value} GHS (${String.format("%.2f", (value as Double) / 1000.0)} TH/s)"
+                    "power" -> "${value} W"
+                    "fanIn", "fanOut" -> "${value} RPM"
+                    "elapsed" -> "${value}s"
+                    else -> value.toString()
+                }
+                MinerDiagnostics.recordField(
+                    MinerDiagnostics.FieldResolution(ip, field, result.second ?: endpointForMissing, result.second?.substringAfter(":") ?: rawForMissing, rawStr, rawStr, finalStr, status)
+                )
+                Log.d(TAG, "resolve $field ip=$ip value=$value source=${result.second} status=${status.name}")
+            } else {
+                // Determine if missing due to no raw capture vs invalid
+                val hasRawForEndpoint = MinerDiagnostics.getRawCaptures(ip).any { it.endpoint.contains(endpointForMissing.split(":").first(), ignoreCase = true) && it.rawJson != null }
+                val status = if (hasRawForEndpoint) MinerDiagnostics.FieldResolution.Status.MISSING else MinerDiagnostics.FieldResolution.Status.ERROR
+                MinerDiagnostics.recordField(
+                    MinerDiagnostics.FieldResolution(ip, field, endpointForMissing, rawForMissing, "null", "null", "—", status)
+                )
+                Log.d(TAG, "resolve $field ip=$ip MISSING/ERROR endpoint=$endpointForMissing status=${status.name}")
+            }
+        }
+        // Also keep old logField for backward compatibility
+        fun logField(name: String, result: Pair<*, String?>?, fallbackMsg: String = "MISSING") {
+            if (result != null) Log.d(TAG, "resolve $name ip=$ip value=${result.first} source=${result.second}")
+            else Log.d(TAG, "resolve $name ip=$ip $fallbackMsg")
+        }
+        logField("hashrate(GHS)", hashrateResult, "MISSING - tried SUMMARY/STATS/V3/DEVS")
+        logField("ghsAv(GHS)", ghsAvResult)
+        logField("elapsed(s)", elapsedResult)
+        logField("power(W)", powerResult)
+        logField("accepted", acceptedResult)
+        logField("rejected", rejectedResult)
+        logField("fanIn(RPM)", fanInResult)
+        logField("fanOut(RPM)", fanOutResult)
+        // Record structured diagnostics for export/share
+        recordFieldDiagnostics("hashrate", hashrateResult, "SUMMARY/STATS/V3/DEVS")
+        recordFieldDiagnostics("ghsAv", ghsAvResult, "SUMMARY/STATS/V3")
+        recordFieldDiagnostics("elapsed", elapsedResult, "SUMMARY/STATS/V3")
+        recordFieldDiagnostics("power", powerResult, "SUMMARY/STATS/V3/PSU")
+        recordFieldDiagnostics("accepted", acceptedResult, "SUMMARY/POOLS/V3")
+        recordFieldDiagnostics("rejected", rejectedResult, "SUMMARY/POOLS/V3")
+        recordFieldDiagnostics("fanIn", fanInResult, "SUMMARY/V3-summary")
+        recordFieldDiagnostics("fanOut", fanOutResult, "SUMMARY/V3-summary")
+
+        // تشخیص reachability دقیق‌تر: اگر SUMMARY خالی بود ولی بقیه منابع داده دارند، reachable بماند
+        val hasAnyData = listOf(totalHashrate, ghsAv, elapsedSeconds?.toDouble(), powerWatt?.toDouble(), accepted?.toDouble(), rejected?.toDouble(), fanSpeedIn?.toDouble(), fanSpeedOut?.toDouble(), avgTemp).any { it != null }
+        val isReachable = !isPartialReachable || hasAnyData || summaryObj != null || v3Summary != null
 
         return MinerInfo(
             ip = ip,
-            isReachable = true,
-            elapsedSeconds = findLong(summaryObj, listOf("Elapsed", "elapsed", "Uptime", "uptime")),
-            fanSpeedIn = findInt(summaryObj, listOf("Fan Speed In", "Fan Speed In ", "FanSpeedIn", "fan_speed_in", "Fan In", "FanIn", "fan speed in")),
-            fanSpeedOut = findInt(summaryObj, listOf("Fan Speed Out", "Fan Speed Out ", "FanSpeedOut", "fan_speed_out", "Fan Out", "FanOut", "fan speed out")),
-            powerWatt = findInt(summaryObj, listOf("Power", "Power Current", "Power Real", "Power Watt", "Watt", "power", "Power Consumption")),
-            averageTemperature = avgTemp ?: findDouble(summaryObj, listOf("Temperature", "Temp", "Avg Temp", "Average Temperature", "temperature", "temp", "Temp Avg")),
+            isReachable = isReachable,
+            elapsedSeconds = elapsedSeconds,
+            fanSpeedIn = fanSpeedIn,
+            fanSpeedOut = fanSpeedOut,
+            powerWatt = powerWatt,
+            averageTemperature = avgTemp ?: findDouble(summaryObj, listOf("Temperature", "Temp", "Avg Temp", "Average Temperature", "temperature", "temp", "Temp Avg")) ?: findDouble(v3Summary, listOf("chip-temp-avg", "board-temperature", "temperature")),
             totalHashrateGhs = totalHashrate,
             ghsAverage = ghsAv,
             firmwareVersion = fwVer,
             minerType = minerType,
             controlBoard = platform,
-            accepted = findInt(summaryObj, listOf("Accepted", "accepted", "Accept", "accept")),
-            rejected = findInt(summaryObj, listOf("Rejected", "rejected", "Reject", "reject")),
+            accepted = accepted,
+            rejected = rejected,
             poolResponseMs = poolResponseMs,
-            hashboards = hashboards,
-            macAddress = findString(minerInfoMsg, listOf("mac", "Mac", "MAC", "macaddr", "MacAddr", "MAC Addr", "mac_address")),
-            powerSupplyModel = findString(psuMsg, listOf("name", "model", "Model", "psu_model", "PSU Model", "PSUmodel", "psu name")),
-            poolWorkerName = findString(poolObj, listOf("User", "user", "Worker", "worker", "username")),
-            poolUrl = findString(poolObj, listOf("URL", "Url", "url", "Pool URL", "pool_url", "Stratum URL")),
-            errorCodes = errorCodes,
+            hashboards = effectiveHashboards,
+            macAddress = findString(minerInfoMsg, listOf("mac", "Mac", "MAC", "macaddr", "MacAddr", "MAC Addr", "mac_address")) ?: findString(v3DeviceMsg?.optJSONObject("network") ?: v3DeviceMsg, listOf("mac", "MAC")),
+            powerSupplyModel = findString(psuMsg, listOf("name", "model", "Model", "psu_model", "PSU Model", "PSUmodel", "psu name")) ?: findString(v3PowerObj, listOf("model", "type", "Model")),
+            poolWorkerName = findString(poolObj, listOf("User", "user", "Worker", "worker", "username")) ?: findString(v3PoolsArray?.optJSONObject(0), listOf("account", "user", "User")),
+            poolUrl = findString(poolObj, listOf("URL", "Url", "url", "Pool URL", "pool_url", "Stratum URL")) ?: findString(v3PoolsArray?.optJSONObject(0), listOf("url", "URL")),
+            errorCodes = allErrorCodes,
             errorCheckFailed = errorCheckFailed
         )
     }
@@ -558,6 +738,532 @@ object WhatsminerClient {
             )
         }
         return list
+    }
+
+    private fun parseHashboardsV3(edevsArray: JSONArray?): List<HashboardInfo> {
+        if (edevsArray == null) return emptyList()
+        val list = mutableListOf<HashboardInfo>()
+        for (i in 0 until edevsArray.length()) {
+            val dev = edevsArray.optJSONObject(i) ?: continue
+            val id = findInt(dev, listOf("id", "slot", "ID", "Slot")) ?: i
+            // V3 uses TH/s directly: hash-average, hash-realtime, factory-hash are TH/s
+            val hashTh = findDouble(dev, listOf("hash-average", "hash-realtime", "hash-1min", "factory-hash", "hash_average", "GHS 5s", "MHS 5s"))
+            val hashGhs = hashTh?.let { it * 1000.0 }
+            list.add(
+                HashboardInfo(
+                    id = id,
+                    temperaturePcb = findDouble(dev, listOf("board-temperature", "chip-temp-avg", "Temperature", "Temp PCB")),
+                    temperatureChip = findDouble(dev, listOf("chip-temp-avg", "chip-temp-max", "chip-temp-min", "Temperature Chip")),
+                    hashrateGhs = hashGhs,
+                    frequencyMhz = findDouble(dev, listOf("freq", "frequency", "Freq", "Chip Frequency")),
+                    effectiveChips = findInt(dev, listOf("effective-chips", "effective_chips", "Effective Chips", "Chip Num")),
+                    status = findString(dev, listOf("status", "Status")) ?: "Alive"
+                )
+            )
+        }
+        return list
+    }
+
+    // ========== Resolvers for the 7 critical fields with multi-endpoint fallback ==========
+
+    private fun findDoubleWithSource(obj: JSONObject?, keys: List<String>): Pair<Double, String>? {
+        if (obj == null) return null
+        for (k in keys) if (obj.has(k) && !obj.isNull(k)) {
+            val v = obj.opt(k)
+            val d = when (v) {
+                is Number -> v.toDouble()
+                is String -> v.trim().toDoubleOrNullCompat()
+                else -> null
+            }
+            if (d != null) return d to k
+        }
+        val lowerMap = mutableMapOf<String, String>()
+        val normMap = mutableMapOf<String, String>()
+        val kIter = obj.keys()
+        while (kIter.hasNext()) { val kk = kIter.next(); lowerMap[kk.lowercase()] = kk; normMap[normalizeKey(kk)] = kk }
+        for (k in keys) {
+            val actual = lowerMap[k.lowercase()] ?: normMap[normalizeKey(k)]
+            if (actual != null && !obj.isNull(actual)) {
+                val v = obj.opt(actual)
+                val d = when (v) {
+                    is Number -> v.toDouble()
+                    is String -> v.trim().toDoubleOrNullCompat()
+                    else -> null
+                }
+                if (d != null) return d to actual
+            }
+        }
+        return null
+    }
+
+    private fun findIntWithSource(obj: JSONObject?, keys: List<String>): Pair<Int, String>? {
+        val p = findDoubleWithSource(obj, keys) ?: return null
+        return p.first.toInt() to p.second
+    }
+
+    private fun findLongWithSource(obj: JSONObject?, keys: List<String>): Pair<Long, String>? {
+        val p = findDoubleWithSource(obj, keys) ?: return null
+        return p.first.toLong() to p.second
+    }
+
+    private fun findStringWithSource(obj: JSONObject?, keys: List<String>): Pair<String, String>? {
+        if (obj == null) return null
+        for (k in keys) if (obj.has(k) && !obj.isNull(k)) {
+            val v = obj.optString(k)
+            if (v.isNotBlank()) return v.trim() to k
+        }
+        val lowerMap = mutableMapOf<String, String>()
+        val normMap = mutableMapOf<String, String>()
+        val kIter = obj.keys()
+        while (kIter.hasNext()) { val kk = kIter.next(); lowerMap[kk.lowercase()] = kk; normMap[normalizeKey(kk)] = kk }
+        for (k in keys) {
+            val actual = lowerMap[k.lowercase()] ?: normMap[normalizeKey(k)]
+            if (actual != null && !obj.isNull(actual)) {
+                val v = obj.optString(actual)
+                if (v.isNotBlank()) return v.trim() to actual
+            }
+        }
+        return null
+    }
+
+    private fun convertHashrateToGhs(rawValue: Double, original: String?, key: String): Double {
+        val lowerOrig = (original ?: "").lowercase()
+        val lowerKey = key.lowercase()
+        // If original string explicitly contains unit, convert accordingly
+        if (lowerOrig.contains("ph")) return rawValue * 1_000_000.0  // PH/s -> GH/s
+        if (lowerOrig.contains("th")) return rawValue * 1000.0
+        if (lowerOrig.contains("gh")) return rawValue
+        if (lowerOrig.contains("mh")) return rawValue / 1000.0
+        // Key-based hint
+        if (lowerKey.contains("ths") || lowerKey.contains("th/s") || lowerKey.contains("th ")) return rawValue * 1000.0
+        if (lowerKey.contains("ghs")) return rawValue
+        if (lowerKey.contains("mhs")) return if (rawValue > 1_000_000) rawValue / 1000.0 else rawValue
+        // Heuristic for numeric-only: >1M likely MH/s
+        return if (rawValue > 1_000_000) rawValue / 1000.0 else rawValue
+    }
+
+    private fun resolveHashrate(
+        ip: String,
+        summaryObj: JSONObject?,
+        statsObj: JSONObject?,
+        v3Summary: JSONObject?,
+        devsArray: JSONArray?,
+        hashboards: List<HashboardInfo>
+    ): Pair<Double, String>? {
+        val keys = listOf(
+            "MHS 5s", "MHS 5s (MHS)", "MHS 5s ", "GHS 5s", "GHS av", "MHS av",
+            "GHS 5s", "HS 5s", "Hash Rate 5s", "mhs 5s", "ghs 5s", "MHS5s",
+            "MHS 5m", "GHS 5m", "MHS 1m", "GHS 1m", "MHS 15m", "GHS 15m",
+            "THS 5s", "THS av", "TH/s", "THS", "Hash Rate", "hashrate", "HT",
+            "GHS", "MHS", "Hashrate", "MHSav", "GHSav",
+            "hash-average", "hash-realtime", "hash-1min", "hash-15min", "factory-hash"
+        )
+        // 1) SUMMARY (old API)
+        findDoubleWithSource(summaryObj, keys)?.let { (v, k) ->
+            val rawStr = summaryObj?.optString(k)
+            val gh = convertHashrateToGhs(v, rawStr, k)
+            Log.d(TAG, "hashrate ip=$ip source=SUMMARY:$k raw=$v str='$rawStr' -> $gh GHS")
+            return gh to "SUMMARY:$k"
+        }
+        // 2) STATS
+        findDoubleWithSource(statsObj, keys)?.let { (v, k) ->
+            val rawStr = statsObj?.optString(k)
+            val gh = convertHashrateToGhs(v, rawStr, k)
+            Log.d(TAG, "hashrate ip=$ip source=STATS:$k raw=$v str='$rawStr' -> $gh GHS")
+            return gh to "STATS:$k"
+        }
+        // 2b) V3 summary (new API) - values are TH/s directly e.g., 101.847 TH/s
+        findDoubleWithSource(v3Summary, keys)?.let { (v, k) ->
+            val rawStr = v3Summary?.optString(k)
+            // V3 hash-average is TH/s: convert TH->GHS
+            val gh = if (k.contains("hash", ignoreCase = true) && !k.contains("mhs", ignoreCase = true) && !k.contains("ghs", ignoreCase = true)) {
+                // plain hash-average without unit hint => assume TH/s for v3
+                v * 1000.0
+            } else convertHashrateToGhs(v, rawStr, k)
+            Log.d(TAG, "hashrate ip=$ip source=V3-summary:$k raw=$v str='$rawStr' -> $gh GHS")
+            return gh to "V3-summary:$k"
+        }
+        // 3) DEVS aggregated
+        val sum = hashboards.mapNotNull { it.hashrateGhs }.takeIf { it.isNotEmpty() }?.sum()
+        if (sum != null && sum > 0) {
+            Log.d(TAG, "hashrate ip=$ip source=DEVS-aggregated sum=$sum GHS")
+            return sum to "DEVS-aggregated"
+        }
+        // 4) DEVS direct sum of raw MHS values as fallback
+        if (devsArray != null && devsArray.length() > 0) {
+            var totalGhs = 0.0
+            var found = false
+            for (i in 0 until devsArray.length()) {
+                val dev = devsArray.optJSONObject(i) ?: continue
+                val r = findDoubleWithSource(dev, keys)
+                if (r != null) {
+                    val gh = convertHashrateToGhs(r.first, dev.optString(r.second), r.second)
+                    totalGhs += gh; found = true
+                }
+            }
+            if (found && totalGhs > 0) {
+                Log.d(TAG, "hashrate ip=$ip source=DEVS-raw sum=$totalGhs GHS")
+                return totalGhs to "DEVS-raw"
+            }
+        }
+        Log.d(TAG, "hashrate ip=$ip MISSING")
+        return null
+    }
+
+    private fun resolveGhsAverage(ip: String, summaryObj: JSONObject?, statsObj: JSONObject?, v3Summary: JSONObject?): Pair<Double, String>? {
+        val keys = listOf("MHS av", "MHS Av", "GHS av", "GHS 5s", "MHS average", "mhs av", "ghs av", "THS av", "GHSav", "MHSav", "Hash Rate Avg", "GHS Avg", "MHS Avg", "hash-average", "hash-realtime", "hash-15min", "hash-1min")
+        findDoubleWithSource(summaryObj, keys)?.let { (v, k) ->
+            val gh = convertHashrateToGhs(v, summaryObj?.optString(k), k)
+            Log.d(TAG, "ghsAv ip=$ip source=SUMMARY:$k raw=$v -> $gh GHS")
+            return gh to "SUMMARY:$k"
+        }
+        findDoubleWithSource(statsObj, keys)?.let { (v, k) ->
+            val gh = convertHashrateToGhs(v, statsObj?.optString(k), k)
+            Log.d(TAG, "ghsAv ip=$ip source=STATS:$k raw=$v -> $gh GHS")
+            return gh to "STATS:$k"
+        }
+        findDoubleWithSource(v3Summary, keys)?.let { (v, k) ->
+            val gh = if (k.startsWith("hash", ignoreCase = true)) v * 1000.0 else convertHashrateToGhs(v, v3Summary?.optString(k), k)
+            Log.d(TAG, "ghsAv ip=$ip source=V3-summary:$k raw=$v -> $gh GHS")
+            return gh to "V3-summary:$k"
+        }
+        return null
+    }
+
+    private fun resolveElapsed(ip: String, summaryObj: JSONObject?, statsObj: JSONObject?, v3Summary: JSONObject?, versionMsg: JSONObject?): Pair<Long, String>? {
+        val keys = listOf(
+            "Elapsed", "elapsed", "ELAPSED", "Elapsed Time", "elapsed_time", "elapsedtime",
+            "Uptime", "uptime", "UPTIME", "Uptime Seconds", "Running Time", "RunningTime",
+            "When", "Total Elapsed", "ElapsedSeconds", "Time", "time", "up_time", "bootup-time"
+        )
+        // Helper to parse value that might be string "12:34:56" or numeric seconds
+        fun parseElapsedValue(raw: Any?, key: String): Long? {
+            if (raw == null) return null
+            if (raw is Number) {
+                val v = raw.toLong()
+                // Some firmwares return "When" as unix timestamp of start -> convert to elapsed
+                if (key.equals("When", ignoreCase = true) && v > 1_000_000_000L) {
+                    val now = System.currentTimeMillis() / 1000
+                    val elapsed = now - v
+                    return if (elapsed in 1..315360000L) elapsed else null
+                }
+                return if (v in 0..315360000L) v else null // 0..10 years
+            }
+            val s = raw.toString().trim()
+            s.toLongOrNull()?.let { v ->
+                if (key.equals("When", ignoreCase = true) && v > 1_000_000_000L) {
+                    val now = System.currentTimeMillis() / 1000
+                    val elapsed = now - v
+                    return if (elapsed in 1..315360000L) elapsed else v
+                }
+                return if (v in 0..315360000L) v else null
+            }
+            // Try "DD days HH:MM:SS" or "HH:MM:SS"
+            if (":" in s) {
+                try {
+                    val timeMatch = Regex("""(\d+):(\d+):(\d+)""").find(s)
+                    if (timeMatch != null) {
+                        val h = timeMatch.groupValues[1].toLongOrNull() ?: 0
+                        val m = timeMatch.groupValues[2].toLongOrNull() ?: 0
+                        val s2 = timeMatch.groupValues[3].toLongOrNull() ?: 0
+                        val days = Regex("""(\d+)\s*days?""", RegexOption.IGNORE_CASE).find(s)?.groupValues?.get(1)?.toLongOrNull() ?: 0
+                        return days * 86400 + h * 3600 + m * 60 + s2
+                    }
+                } catch (_: Exception) {}
+            }
+            // Extract first number as seconds fallback
+            Regex("""-?\d+""").find(s)?.value?.toLongOrNull()?.let { return it }
+            return null
+        }
+
+        // Search SUMMARY
+        for (k in keys) {
+            val actual = findKeyCaseInsensitive(summaryObj, k) ?: continue
+            val raw = summaryObj?.opt(actual)
+            val parsed = parseElapsedValue(raw, actual)
+            if (parsed != null) {
+                Log.d(TAG, "elapsed ip=$ip source=SUMMARY:$actual raw=$raw -> $parsed s")
+                return parsed to "SUMMARY:$actual"
+            }
+        }
+        // STATS
+        for (k in keys) {
+            val actual = findKeyCaseInsensitive(statsObj, k) ?: continue
+            val raw = statsObj?.opt(actual)
+            val parsed = parseElapsedValue(raw, actual)
+            if (parsed != null) {
+                Log.d(TAG, "elapsed ip=$ip source=STATS:$actual raw=$raw -> $parsed s")
+                return parsed to "STATS:$actual"
+            }
+        }
+        // V3 summary (new API uses elapsed as seconds)
+        for (k in keys) {
+            val actual = findKeyCaseInsensitive(v3Summary, k) ?: continue
+            val raw = v3Summary?.opt(actual)
+            val parsed = parseElapsedValue(raw, actual)
+            if (parsed != null) {
+                Log.d(TAG, "elapsed ip=$ip source=V3-summary:$actual raw=$raw -> $parsed s")
+                return parsed to "V3-summary:$actual"
+            }
+        }
+        // Version or other? Some firmwares expose uptime elsewhere
+        for (k in keys) {
+            val actual = findKeyCaseInsensitive(versionMsg, k) ?: continue
+            val raw = versionMsg?.opt(actual)
+            val parsed = parseElapsedValue(raw, actual)
+            if (parsed != null) {
+                Log.d(TAG, "elapsed ip=$ip source=version:$actual raw=$raw -> $parsed s")
+                return parsed to "version:$actual"
+            }
+        }
+        Log.d(TAG, "elapsed ip=$ip MISSING keys tried=${keys.joinToString()} summaryKeys=${summaryObj?.keys()?.asSequence()?.toList()} v3Keys=${v3Summary?.keys()?.asSequence()?.toList()}")
+        return null
+    }
+
+    private fun resolvePower(ip: String, summaryObj: JSONObject?, statsObj: JSONObject?, v3Summary: JSONObject?, psuMsg: JSONObject?, psuRoot: JSONObject?, v3PowerObj: JSONObject?): Pair<Int, String>? {
+        val summaryKeys = listOf("Power", "Power Real", "Power Current", "Power Watt", "Watt", "power", "Power Consumption", "Power Draw", "Power Limit", "Wattage", "PowerUsage", "Power Value", "Current Power", "Power AC", "Power DC", "W", "watt", "power-realtime", "power-5min", "power-rate")
+        val psuKeys = listOf("power", "Power", "power_limit", "Power Limit", "Current Power", "Watt", "watt", "Power Draw", "Power Value", "Power Real", "power_real", "Power AC", "Power Usage", "power_value", "pin")
+        fun convertPower(raw: Double, str: String?, key: String): Int {
+            val s = (str ?: "").lowercase()
+            val lk = key.lowercase()
+            if (s.contains("kw") || lk.contains("kw")) return (raw * 1000).toInt()
+            // Heuristic: if value < 100 likely kW (e.g., 3.2 kW), convert
+            if (raw in 0.1..100.0 && (s.contains("kw") || (!s.contains("w") && raw < 100))) {
+                // ambiguous, but if raw < 100 and no explicit W, likely kW on some fw? Check key
+                // Better to keep W if raw is e.g., 30 kW would be 30, but 30W is impossible for miner, so likely kW
+                if (raw < 120) {
+                    Log.d(TAG, "power heuristic ip=$ip raw=$raw assumed kW -> ${raw*1000}W")
+                    return (raw * 1000).toInt()
+                }
+            }
+            return raw.toInt()
+        }
+        findDoubleWithSource(summaryObj, summaryKeys)?.let { (v, k) ->
+            val str = summaryObj?.optString(k)
+            val w = convertPower(v, str, k)
+            Log.d(TAG, "power ip=$ip source=SUMMARY:$k raw=$v str='$str' -> $w W")
+            if (w in 100..20000) return w to "SUMMARY:$k"
+            // Even if out of range, return but log warning
+            Log.w(TAG, "power ip=$ip SUMMARY:$k value $w W out of expected range")
+            return w to "SUMMARY:$k"
+        }
+        findDoubleWithSource(statsObj, summaryKeys)?.let { (v, k) ->
+            val str = statsObj?.optString(k)
+            val w = convertPower(v, str, k)
+            Log.d(TAG, "power ip=$ip source=STATS:$k raw=$v str='$str' -> $w W")
+            return w to "STATS:$k"
+        }
+        findDoubleWithSource(psuMsg, psuKeys)?.let { (v, k) ->
+            val str = psuMsg?.optString(k)
+            val w = convertPower(v, str, k)
+            Log.d(TAG, "power ip=$ip source=PSU-Msg:$k raw=$v str='$str' -> $w W")
+            return w to "PSU-Msg:$k"
+        }
+        findDoubleWithSource(psuRoot, psuKeys)?.let { (v, k) ->
+            val str = psuRoot?.optString(k)
+            val w = convertPower(v, str, k)
+            Log.d(TAG, "power ip=$ip source=PSU-root:$k raw=$v -> $w W")
+            return w to "PSU-root:$k"
+        }
+        // V3 power (new API): summary power-realtime/power-5min and device power.pin
+        findDoubleWithSource(v3Summary, listOf("power-realtime", "power-5min", "power", "Power", "pin", "power_rate"))?.let { (v, k) ->
+            val str = v3Summary?.optString(k)
+            val w = convertPower(v, str, k)
+            Log.d(TAG, "power ip=$ip source=V3-summary:$k raw=$v str='$str' -> $w W")
+            // pin in deviceInfo is already Watts (3264), power-realtime also Watts
+            return w to "V3-summary:$k"
+        }
+        findDoubleWithSource(v3PowerObj, psuKeys)?.let { (v, k) ->
+            val str = v3PowerObj?.optString(k)
+            val w = convertPower(v, str, k)
+            Log.d(TAG, "power ip=$ip source=V3-power:$k raw=$v str='$str' -> $w W")
+            return w to "V3-power:$k"
+        }
+        // Last resort: scan any numeric key containing "power" or "watt" in any object
+        for (obj in listOf(summaryObj to "SUMMARY", statsObj to "STATS", psuMsg to "PSU", v3Summary to "V3-summary", v3PowerObj to "V3-power")) {
+            val jo = obj.first ?: continue
+            val keys = jo.keys()
+            while (keys.hasNext()) {
+                val kk = keys.next()
+                if (kk.contains("power", ignoreCase = true) || kk.contains("watt", ignoreCase = true)) {
+                    val raw = jo.opt(kk)
+                    val d = when (raw) {
+                        is Number -> raw.toDouble()
+                        is String -> raw.trim().toDoubleOrNullCompat()
+                        else -> null
+                    }
+                    if (d != null && d > 0) {
+                        val w = convertPower(d, raw.toString(), kk)
+                        if (w in 100..20000) {
+                            Log.d(TAG, "power ip=$ip source=${obj.second}:$kk (fallback scan) -> $w W")
+                            return w to "${obj.second}:$kk"
+                        }
+                    }
+                }
+            }
+        }
+        Log.d(TAG, "power ip=$ip MISSING")
+        return null
+    }
+
+    private fun resolveAccepted(ip: String, summaryObj: JSONObject?, statsObj: JSONObject?, poolObj: JSONObject?, poolsArray: JSONArray?, v3PoolsArray: JSONArray?): Pair<Int, String>? {
+        val keys = listOf("Accepted", "accepted", "ACCEPTED", "Accepted Shares", "AcceptedShares", "Accepted Count", "Accept", "accept", "Pool Accepted", "pool_accepted", "AcceptedCount", "Accepted_Count", "AcceptedSharesCount")
+        findIntWithSource(summaryObj, keys)?.let { (v, k) -> Log.d(TAG, "accepted ip=$ip source=SUMMARY:$k -> $v"); return v to "SUMMARY:$k" }
+        findIntWithSource(statsObj, keys)?.let { (v, k) -> Log.d(TAG, "accepted ip=$ip source=STATS:$k -> $v"); return v to "STATS:$k" }
+        findIntWithSource(poolObj, keys)?.let { (v, k) -> Log.d(TAG, "accepted ip=$ip source=POOLS[0]:$k -> $v"); return v to "POOLS[0]:$k" }
+        // Aggregate across all pools if poolsArray present
+        if (poolsArray != null && poolsArray.length() > 0) {
+            var sum = 0; var found = false
+            for (i in 0 until poolsArray.length()) {
+                val p = poolsArray.optJSONObject(i) ?: continue
+                val r = findIntWithSource(p, keys)
+                if (r != null) { sum += r.first; found = true }
+            }
+            if (found) {
+                Log.d(TAG, "accepted ip=$ip source=POOLS-aggregated -> $sum")
+                return sum to "POOLS-aggregated"
+            }
+        }
+        // V3 pools (new API) currently has no Accepted count (only reject-rate), so will be MISSING - that's expected, not error.
+        if (v3PoolsArray != null && v3PoolsArray.length() > 0) {
+            var sum = 0; var found = false
+            for (i in 0 until v3PoolsArray.length()) {
+                val p = v3PoolsArray.optJSONObject(i) ?: continue
+                val r = findIntWithSource(p, keys)
+                if (r != null) { sum += r.first; found = true }
+            }
+            if (found) {
+                Log.d(TAG, "accepted ip=$ip source=V3-POOLS-aggregated -> $sum")
+                return sum to "V3-POOLS-aggregated"
+            }
+        }
+        // Scan any object for accepted key as last resort
+        for (obj in listOf(summaryObj to "SUMMARY", statsObj to "STATS")) {
+            val jo = obj.first ?: continue
+            val actual = findKeyCaseInsensitive(jo, "Accepted") ?: findKeyCaseInsensitive(jo, "accept") ?: continue
+            val d = jo.opt(actual)
+            val v = when (d) { is Number -> d.toInt(); is String -> d.trim().toIntOrNull(); else -> null }
+            if (v != null) { Log.d(TAG, "accepted ip=$ip source=${obj.second}:$actual (fallback) -> $v"); return v to "${obj.second}:$actual" }
+        }
+        Log.d(TAG, "accepted ip=$ip MISSING (note: V3 new API intentionally has no Accepted count, expected MISSING for M50/M60 new firmware)")
+        return null
+    }
+
+    private fun resolveRejected(ip: String, summaryObj: JSONObject?, statsObj: JSONObject?, poolObj: JSONObject?, poolsArray: JSONArray?, v3PoolsArray: JSONArray?): Pair<Int, String>? {
+        val keys = listOf("Rejected", "rejected", "REJECTED", "Rejected Shares", "RejectedShares", "Rejected Count", "Reject", "reject", "Pool Rejected", "Stale", "Discarded", "RejectedCount", "Rejected_Count", "RejectedSharesCount", "HW", "Hardware Errors", "reject-rate", "reject_rate")
+        findIntWithSource(summaryObj, keys)?.let { (v, k) -> Log.d(TAG, "rejected ip=$ip source=SUMMARY:$k -> $v"); return v to "SUMMARY:$k" }
+        findIntWithSource(statsObj, keys)?.let { (v, k) -> Log.d(TAG, "rejected ip=$ip source=STATS:$k -> $v"); return v to "STATS:$k" }
+        findIntWithSource(poolObj, keys)?.let { (v, k) -> Log.d(TAG, "rejected ip=$ip source=POOLS[0]:$k -> $v"); return v to "POOLS[0]:$k" }
+        if (poolsArray != null && poolsArray.length() > 0) {
+            var sum = 0; var found = false
+            for (i in 0 until poolsArray.length()) {
+                val p = poolsArray.optJSONObject(i) ?: continue
+                val r = findIntWithSource(p, keys)
+                if (r != null) { sum += r.first; found = true }
+            }
+            if (found) {
+                Log.d(TAG, "rejected ip=$ip source=POOLS-aggregated -> $sum")
+                return sum to "POOLS-aggregated"
+            }
+        }
+        // V3: reject-rate is 0..1 fraction -> convert to count estimate if needed, but we treat as 0 for missing
+        if (v3PoolsArray != null && v3PoolsArray.length() > 0) {
+            for (i in 0 until v3PoolsArray.length()) {
+                val p = v3PoolsArray.optJSONObject(i) ?: continue
+                val r = findDoubleWithSource(p, listOf("reject-rate", "reject_rate", "Reject Rate"))
+                if (r != null) {
+                    val rate = r.first
+                    // If rate is very small (<1) it's ratio, not count; treat 0 as notRejected, >0 as approx
+                    val approx = if (rate < 1 && rate > 0) (rate * 100).toInt() else rate.toInt()
+                    Log.d(TAG, "rejected ip=$ip source=V3-POOLS:reject-rate=$rate -> approx $approx")
+                    return approx to "V3-POOLS:reject-rate"
+                }
+            }
+        }
+        Log.d(TAG, "rejected ip=$ip MISSING")
+        return null
+    }
+
+    private fun resolveFanSpeed(ip: String, summaryObj: JSONObject?, statsObj: JSONObject?, v3Summary: JSONObject?, isInput: Boolean): Pair<Int, String>? {
+        val inputKeys = listOf("Fan Speed In", "FanSpeedIn", "fan_speed_in", "Fan In", "FanIn", "Fan 1", "Fan1", "FAN_SPEED_IN", "Fan Input", "Intake Fan", "FanInSpeed", "Fan In Speed", "Cooling Fan In", "fan1", "fan_in", "FAN1", "FANIN", "Fan In RPM", "FAN IN", "fan-speed-in")
+        val outputKeys = listOf("Fan Speed Out", "FanSpeedOut", "fan_speed_out", "Fan Out", "FanOut", "Fan 2", "Fan2", "FAN_SPEED_OUT", "Fan Output", "Exhaust Fan", "fan2", "fan_out", "FAN2", "FANOUT", "Fan Out RPM", "FAN OUT", "fan-speed-out")
+        val keys = if (isInput) inputKeys else outputKeys
+
+        // Direct key search - SUMMARY, STATS, V3
+        findIntWithSource(summaryObj, keys)?.let { (v, k) -> if (v in 0..15000) { Log.d(TAG, "fan${if(isInput) "In" else "Out"} ip=$ip source=SUMMARY:$k -> $v"); return v to "SUMMARY:$k" } }
+        findIntWithSource(statsObj, keys)?.let { (v, k) -> if (v in 0..15000) { Log.d(TAG, "fan${if(isInput) "In" else "Out"} ip=$ip source=STATS:$k -> $v"); return v to "STATS:$k" } }
+        findIntWithSource(v3Summary, keys)?.let { (v, k) -> if (v in 0..15000) { Log.d(TAG, "fan${if(isInput) "In" else "Out"} ip=$ip source=V3-summary:$k -> $v"); return v to "V3-summary:$k" } }
+
+        // Array-based: "Fans" or "Fan Speed" as JSONArray
+        val arrayKeys = listOf("Fans", "fans", "FANS", "Fan Speed", "FanSpeed", "fan_speed", "Fan", "fan", "FAN", "Cooling Fans")
+        for (obj in listOf(summaryObj to "SUMMARY", statsObj to "STATS", v3Summary to "V3-summary")) {
+            val jo = obj.first ?: continue
+            for (ak in arrayKeys) {
+                val actual = findKeyCaseInsensitive(jo, ak) ?: continue
+                val arr = jo.optJSONArray(actual)
+                if (arr != null && arr.length() >= 1) {
+                    // Heuristic: Fans[0]=In, Fans[1]=Out; sometimes more fans, take first two
+                    val idx = if (isInput) 0 else 1
+                    if (idx < arr.length()) {
+                        val raw = arr.opt(idx)
+                        val v = when (raw) { is Number -> raw.toInt(); is String -> raw.trim().toIntOrNullCompat()?.toInt(); else -> null }
+                        if (v != null && v in 0..15000) {
+                            Log.d(TAG, "fan${if(isInput) "In" else "Out"} ip=$ip source=${obj.second}:$actual[$idx] -> $v")
+                            return v to "${obj.second}:$actual[$idx]"
+                        }
+                    }
+                    // If array is of objects with Speed field?
+                    for (i in 0 until arr.length()) {
+                        val item = arr.optJSONObject(i) ?: continue
+                        val f = findIntWithSource(item, listOf("Speed", "RPM", "rpm", "Fan Speed", "Value"))
+                        if (f != null && f.first in 0..15000) {
+                            // Map first object to In, second to Out if array length >=2
+                            if ((isInput && i == 0) || (!isInput && i == 1) || arr.length() == 1) {
+                                Log.d(TAG, "fan${if(isInput) "In" else "Out"} ip=$ip source=${obj.second}:$actual[$i].Speed -> ${f.first}")
+                                return f.first to "${obj.second}:$actual[$i].Speed"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback scan: any key containing "fan" and "in"/"out" or numeric fan1/fan2
+        for (obj in listOf(summaryObj to "SUMMARY", statsObj to "STATS", v3Summary to "V3-summary")) {
+            val jo = obj.first ?: continue
+            val iter = jo.keys()
+            while (iter.hasNext()) {
+                val kk = iter.next()
+                val lk = kk.lowercase()
+                val isInKey = lk.contains("fan") && (lk.contains("in") || lk.contains("1") || lk.contains("intake"))
+                val isOutKey = lk.contains("fan") && (lk.contains("out") || lk.contains("2") || lk.contains("exhaust") || lk.contains("output"))
+                val match = if (isInput) isInKey else isOutKey
+                if (match) {
+                    val raw = jo.opt(kk)
+                    val v = when (raw) { is Number -> raw.toInt(); is String -> raw.trim().toIntOrNullCompat()?.toInt(); is JSONArray -> { if (raw.length()>0) raw.optInt(0) else null }; else -> null }
+                    if (v != null && v in 0..15000) {
+                        Log.d(TAG, "fan${if(isInput) "In" else "Out"} ip=$ip source=${obj.second}:$kk (fallback scan) -> $v")
+                        return v to "${obj.second}:$kk"
+                    }
+                }
+            }
+            // Single "Fan Speed" key (some firmwares report one value for both fans)
+            val single = findKeyCaseInsensitive(jo, "Fan Speed") ?: findKeyCaseInsensitive(jo, "FanSpeed")
+            if (single != null) {
+                val raw = jo.opt(single)
+                val v = when (raw) { is Number -> raw.toInt(); is String -> raw.trim().toIntOrNullCompat()?.toInt(); else -> null }
+                if (v != null && v in 0..15000) {
+                    Log.d(TAG, "fan${if(isInput) "In" else "Out"} ip=$ip source=${obj.second}:$single (single fallback) -> $v")
+                    return v to "${obj.second}:$single"
+                }
+            }
+        }
+        Log.d(TAG, "fan${if(isInput) "In" else "Out"} ip=$ip MISSING")
+        return null
+    }
+
+    private fun String.toIntOrNullCompat(): Int? {
+        return this.trim().toDoubleOrNullCompat()?.toInt()
     }
 
     // Helpers: case-insensitive and normalized key handling ------------------------

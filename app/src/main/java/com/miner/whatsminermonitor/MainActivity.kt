@@ -48,6 +48,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.miner.whatsminermonitor.model.HashboardInfo
 import com.miner.whatsminermonitor.model.MinerInfo
+import com.miner.whatsminermonitor.model.MinerDiagnostics
 import com.miner.whatsminermonitor.model.PoolEntry
 import com.miner.whatsminermonitor.model.PoolProfile
 import com.miner.whatsminermonitor.model.PoolProfiles
@@ -949,6 +950,9 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                 networkHashrateEh = networkHashrateEh ?: 994.68
             )
 
+            Spacer(modifier = Modifier.height(14.dp))
+            DiagnosticsSection(minerIp = miner.ip)
+
             Spacer(modifier = Modifier.height(24.dp))
         }
     }
@@ -1515,13 +1519,105 @@ fun tempColor(temp: Double?): Color {
     }
 }
 
+@Composable
+fun DiagnosticsSection(minerIp: String) {
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    var showRawDialog by remember { mutableStateOf(false) }
+    var rawText by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.BugReport, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Diagnostics", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                "If values are missing, copy raw API responses and send to support for parser fix.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        rawText = MinerDiagnostics.getLastRawForShare(minerIp)
+                        showRawDialog = true
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Filled.Visibility, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Show raw", style = MaterialTheme.typography.labelSmall)
+                }
+                OutlinedButton(
+                    onClick = {
+                        val txt = MinerDiagnostics.getLastRawForShare(minerIp)
+                        clipboard.setText(AnnotatedString(txt))
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Copy raw", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            val resolutions = remember(minerIp) { MinerDiagnostics.getFieldResolutions(minerIp) }
+            if (resolutions.isNotEmpty()) {
+                Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Spacer(modifier = Modifier.height(6.dp))
+                Text("Field report (IP -> endpoint -> key -> raw -> parsed -> final):", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(4.dp))
+                for (r in resolutions.take(20)) {
+                    Text(
+                        r.logLine(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when (r.status) {
+                            MinerDiagnostics.FieldResolution.Status.OK, MinerDiagnostics.FieldResolution.Status.ZERO -> Color(0xFF4CAF50)
+                            MinerDiagnostics.FieldResolution.Status.MISSING -> Color(0xFF9E9E9E)
+                            else -> Color(0xFFF44336)
+                        },
+                        modifier = Modifier.padding(vertical = 1.dp)
+                    )
+                }
+            }
+        }
+    }
+    if (showRawDialog) {
+        AlertDialog(
+            onDismissRequest = { showRawDialog = false },
+            title = { Text("Raw API responses") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text(rawText, style = MaterialTheme.typography.labelSmall)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    clipboard.setText(AnnotatedString(rawText))
+                    showRawDialog = false
+                }) { Text("Copy") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRawDialog = false }) { Text("Close") }
+            }
+        )
+    }
+}
+
 fun formatNumber(n: Int): String =
     NumberFormat.getNumberInstance(Locale.US).format(n)
 
 fun formatToman(n: Long): String {
     return when {
-        n >= 1_000_000_000 -> "%.2f میلیارد".format(n / 1_000_000_000.0)
-        n >= 1_000_000 -> "%.0f میلیون".format(n / 1_000_000.0)
+        n >= 1_000_000_000 -> "%.2f B".format(n / 1_000_000_000.0)
+        n >= 1_000_000 -> "%.0f M".format(n / 1_000_000.0)
         else -> NumberFormat.getNumberInstance(Locale.US).format(n)
     }
 }

@@ -130,9 +130,9 @@ object NetworkScanner {
         val jobs = hosts.map { ip ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
-                    // Use more generous timeout for congested networks
-                    if (WhatsminerClient.isPortOpen(ip, timeoutMs = 800)) {
-                        Log.d(TAG, "miner port open detected ip=$ip")
+                    // Check both old (4028) and new (4433) API ports for M2x-M6x full coverage
+                    if (WhatsminerClient.isAnyPortOpen(ip, timeoutMs = 800)) {
+                        Log.d(TAG, "miner port open detected ip=$ip (4028 or 4433)")
                         onMinerFound(ip)
                     }
                 }
