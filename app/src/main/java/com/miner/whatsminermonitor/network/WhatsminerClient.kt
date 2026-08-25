@@ -324,6 +324,15 @@ object WhatsminerClient {
         return parseJsonLenient(raw)
     }
 
+    // اطلاعات شبکه (از جمله MAC)
+    suspend fun fetchMinerInfo(ip: String): JSONObject? {
+        val raw = sendRawCommandWithRetry(ip, """{"cmd":"get_miner_info","info":"mac,ip,hostname"}""", retries = 1)
+        if (raw == null) { MinerDiagnostics.recordRaw(ip, "get_miner_info", API_PORT, null, false, "no response"); return null }
+        val ok = parseJsonLenient(raw) != null
+        MinerDiagnostics.recordRaw(ip, "get_miner_info", API_PORT, raw, ok, if (!ok) "parse failed" else null)
+        return parseJsonLenient(raw)
+    }
+
     suspend fun fetchPools(ip: String): JSONObject? {
         val raw = sendRawCommandWithRetry(ip, """{"cmd":"pools"}""", retries = 1) ?: return null
         MinerDiagnostics.recordRaw(ip, "pools", API_PORT, raw, parseJsonLenient(raw) != null)
