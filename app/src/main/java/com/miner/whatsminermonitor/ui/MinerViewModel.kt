@@ -404,6 +404,11 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * اسکن پیوسته: با یک بار زدن، اسکنر روشن می‌مونه و هر چند ثانیه یک‌بار دوباره شبکه رو
      * برای پیدا کردن دستگاه‌های جدید می‌گرده — تا وقتی که خود کاربر با stopScan() متوقفش کنه.
+     *
+     * نکتهٔ مهم دربارهٔ سرعت نمایش: callback اسکنر به‌محض باز بودن پورت هر IP صدا زده می‌شود؛
+     * اول یک ردیف موقت برای همان IP به لیست UI اضافه می‌شود (کاربر همان لحظه دستگاه را می‌بیند)
+     * و بعد queryMiner آماره‌های کامل را می‌خواند و جایگزین می‌کند. قبلاً UI تا پایان کامل
+     * queryMiner منتظر می‌ماند و به همین دلیل پیدا شدن ماینرها خیلی دیر دیده می‌شد.
      */
     fun startScan() {
         if (_isScanning.value) return
@@ -430,6 +435,19 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
                         "اسکنر روشن است — در حال بررسی دوباره شبکه برای دستگاه‌های جدید..."
 
                     NetworkScanner.scanForMiners(hosts) { ip ->
+                        // ۱) به‌محض باز بودن پورت این IP، نتیجه فوراً به لیست UI می‌رود:
+                        //    یک ردیف موقت اضافه می‌شود (فقط اگر قبلاً در لیست نباشد) تا کاربر
+                        //    بدون معطلی دستگاه را ببیند؛ در دفعات بعدی اسکن ردیف موجود حفظ
+                        //    می‌شود تا دادهٔ قبلی پرش نکند
+                        listMutex.withLock {
+                            val existing = _miners.value.toMutableList()
+                            if (existing.indexOfFirst { it.ip == ip } < 0) {
+                                existing.add(MinerInfo(ip = ip))
+                                _miners.value = existing.sortedBy { it.ip }
+                                _foundCount.value = _miners.value.size
+                            }
+                        }
+                        // ۲) آماره‌های کامل خوانده و ردیف موقت جایگزین می‌شود
                         try {
                             val info = WhatsminerClient.queryMiner(ip)
                             listMutex.withLock {
@@ -444,7 +462,8 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         } catch (e: Exception) {
                             android.util.Log.e("MinerViewModel", "queryMiner exception for $ip", e)
-                            // Add placeholder so user sees device was found but data failed;  will be refreshed in next loop
+                            // دستگاه پیدا شده ولی خواندن اطلاعات شکست خورد؛ ردیف موقت با حالت
+                            // خطا جایگزین می‌شود و در دوره‌های بعدی رفرش زنده دوباره تلاش می‌شود
                             val fallback = com.miner.whatsminermonitor.model.MinerInfo(ip = ip, isReachable = false, errorMessage = "خطا در خواندن اطلاعات: ${e.message}")
                             listMutex.withLock {
                                 val existing = _miners.value.toMutableList()

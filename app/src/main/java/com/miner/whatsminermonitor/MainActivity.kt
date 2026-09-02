@@ -105,6 +105,8 @@ fun AppNavHost(viewModel: MinerViewModel = viewModel()) {
 
 // ==================================================================================
 // صفحه اصلی: خلاصه (درآمد روزانه / گیج هشریت کل / تعداد ماینرها) + لیست دستگاه‌ها
+// بازطراحی مدرن: نوار وضعیت اسکن با نشانگر زنده، کارت خلاصه با کاشی‌های رنگی و
+// کارت‌های ماینر با آیکون رنگی + نقطهٔ وضعیت + چیپ‌های آماری
 // ==================================================================================
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -126,12 +128,24 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
     var showCalculator by remember { mutableStateOf(false) }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text("مانیتور ماینرهای Whatsminer") },
+                title = {
+                    Text(
+                        "مانیتور ماینرهای Whatsminer",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
                 actions = {
                     IconButton(onClick = { showCalculator = true }) {
-                        Icon(Icons.Filled.Calculate, contentDescription = "محاسبه‌گر سود استخراج")
+                        Icon(
+                            Icons.Filled.Calculate,
+                            contentDescription = "محاسبه‌گر سود استخراج",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
                     }
                 }
             )
@@ -139,6 +153,9 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = { if (isScanning) viewModel.stopScan() else viewModel.startScan() },
+                shape = RoundedCornerShape(16.dp),
+                containerColor = if (isScanning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                contentColor = Color.White,
                 icon = {
                     if (isScanning) {
                         Icon(Icons.Filled.Stop, contentDescription = null)
@@ -146,25 +163,19 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
                         Icon(Icons.Filled.Search, contentDescription = null)
                     }
                 },
-                text = { Text(if (isScanning) "توقف اسکن" else "اسکن شبکه") }
+                text = { Text(if (isScanning) "توقف اسکن" else "اسکن شبکه", fontWeight = FontWeight.Bold) }
             )
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            status?.let {
-                Text(
-                    text = it,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
-                )
-            }
+            // نوار وضعیت اسکن (با نشانگر چرخان در حالت اسکن زنده)
+            ScanStatusBanner(status = status, isScanning = isScanning)
 
             SummaryHeader(
                 dailyUsdt = totalDailyUsdt,
                 totalThs = totalThs,
                 minerCount = miners.size,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
             )
 
             lastPriceUpdate?.let { updatedAt ->
@@ -184,13 +195,13 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
                 EmptyState()
             } else {
                 LazyColumn(
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(miners, key = { it.ip }) { miner ->
                         MinerListItem(miner = miner, btcPriceUsdt = btcPriceUsdt, networkHashrateEh = networkEh, onOpen = { onOpenDetail(miner.ip) })
                     }
-                    item { Spacer(modifier = Modifier.height(72.dp)) }
+                    item { Spacer(modifier = Modifier.height(84.dp)) }
                 }
             }
         }
@@ -202,6 +213,41 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
             liveUsdToToman = viewModel.usdToToman.collectAsState().value,
             liveNetworkHashrateEh = networkEh,
             onDismiss = { showCalculator = false }
+        )
+    }
+}
+
+/**
+ * نوار وضعیت اسکن: پیام وضعیت در یک کپسول ملایم رنگی؛ در حالت اسکن فعال یک
+ * نشانگر چرخان کوچک کنار متن نشان داده می‌شود تا کاربر بفهمد اسکنر زنده است
+ */
+@Composable
+fun ScanStatusBanner(status: String?, isScanning: Boolean) {
+    if (status == null) return
+    Row(
+        modifier = Modifier
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(
+                if (isScanning) Color(0xFF2196F3).copy(alpha = 0.10f)
+                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+            )
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (isScanning) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                strokeWidth = 2.dp,
+                color = Color(0xFF2196F3)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+        Text(
+            status,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface
         )
     }
 }
@@ -310,18 +356,30 @@ fun ProfitCalculatorDialog(
 @Composable
 fun EmptyState() {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(
-                painter = painterResource(id = R.drawable.ic_wifi_wait),
-                contentDescription = null,
-                modifier = Modifier.size(56.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-            )
-            Spacer(modifier = Modifier.height(12.dp))
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(24.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(96.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    painter = painterResource(id = R.drawable.ic_wifi_wait),
+                    contentDescription = null,
+                    modifier = Modifier.size(46.dp),
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f)
+                )
+            }
+            Spacer(modifier = Modifier.height(16.dp))
             Text(
                 "برای پیدا کردن ماینرها روی «اسکن شبکه» بزنید",
                 style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(horizontal = 32.dp)
             )
@@ -348,46 +406,26 @@ fun SummaryHeader(
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp, horizontal = 8.dp),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp, horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // درآمد روزانه
-            Column(
-                modifier = Modifier
-                    .weight(0.8f)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFF4CAF50).copy(alpha = 0.10f))
-                    .padding(vertical = 14.dp, horizontal = 4.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Icon(
-                    Icons.Filled.AttachMoney,
-                    contentDescription = null,
-                    tint = Color(0xFF4CAF50),
-                    modifier = Modifier.size(26.dp)
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    dailyUsdt?.let { "$${"%.2f".format(it)}" } ?: "—",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    "درآمد روزانه",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center
-                )
-            }
+            SummaryTile(
+                icon = Icons.Filled.AttachMoney,
+                tint = Color(0xFF4CAF50),
+                value = dailyUsdt?.let { "$${"%.2f".format(it)}" } ?: "—",
+                label = "درآمد روزانه",
+                modifier = Modifier.weight(0.85f)
+            )
 
             // گیج هشریت کل
             Column(
-                modifier = Modifier.weight(1.2f),
+                modifier = Modifier.weight(1.3f),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 SpeedGauge(
@@ -406,35 +444,51 @@ fun SummaryHeader(
             }
 
             // تعداد کل ماینرها
-            Column(
-                modifier = Modifier
-                    .weight(0.8f)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFF2196F3).copy(alpha = 0.10f))
-                    .padding(vertical = 14.dp, horizontal = 4.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Icon(
-                    Icons.Filled.Hub,
-                    contentDescription = null,
-                    tint = Color(0xFF2196F3),
-                    modifier = Modifier.size(26.dp)
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    "$minerCount",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    "کل ماینرها",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center
-                )
-            }
+            SummaryTile(
+                icon = Icons.Filled.Hub,
+                tint = Color(0xFF2196F3),
+                value = "$minerCount",
+                label = "کل ماینرها",
+                modifier = Modifier.weight(0.85f)
+            )
         }
+    }
+}
+
+/** کاشی رنگی داخل کارت خلاصه: آیکون داخل دایره + مقدار + برچسب */
+@Composable
+fun SummaryTile(
+    icon: ImageVector,
+    tint: Color,
+    value: String,
+    label: String,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(18.dp))
+            .background(tint.copy(alpha = 0.10f))
+            .padding(vertical = 12.dp, horizontal = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            modifier = Modifier
+                .size(30.dp)
+                .clip(CircleShape)
+                .background(tint.copy(alpha = 0.16f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(17.dp))
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(1.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
     }
 }
 
@@ -526,83 +580,190 @@ fun MinerDeviceIcon(modifier: Modifier = Modifier, tint: Color = Color(0xFF3A3A3
 }
 
 // ==================================================================================
-// آیتم فشرده لیست ماینرها روی صفحه اصلی + دکمه باز کردن جزئیات
+// کارت مدرن ماینر در لیست اصلی + دکمه باز کردن جزئیات
+// ساختار: کادر رنگی آیکون + نقطهٔ وضعیت | مشخصات با چیپ‌های آماری | درآمد + نشان سلامت
+// (ردیف موقت بین «پورت باز شد» و «اطلاعات کامل خوانده شد» با نشانگر «در حال خواندن» نمایش داده می‌شود)
 // ==================================================================================
 @Composable
 fun MinerListItem(miner: MinerInfo, btcPriceUsdt: Double?, networkHashrateEh: Double = 994.68, onOpen: () -> Unit) {
     val dailyUsdt = btcPriceUsdt?.let { miner.estimatedDailyBtc(networkHashrateEh) * it }
+    // دستگاهی که تازه پورتش باز شده ولی هنوز queryMiner کامل نشده (ردیف موقت اسکنر)
+    val isLoading = miner.isReachable && miner.minerType == null && miner.poolWorkerName == null
 
-    Column {
-        Text(
-            miner.minerType ?: "WhatsMiner",
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 4.dp, start = 4.dp)
-        )
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(enabled = miner.isReachable) { onOpen() },
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    val accentColor = when {
+        !miner.isReachable -> MaterialTheme.colorScheme.error
+        isLoading -> Color(0xFFFF9800)
+        else -> MaterialTheme.colorScheme.primary
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = miner.isReachable && !isLoading) { onOpen() },
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                MinerDeviceIcon(
-                    modifier = Modifier.size(64.dp),
-                    tint = if (miner.isReachable) Color(0xFF3A3A3A) else MaterialTheme.colorScheme.error
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    if (!miner.isReachable) {
-                        Text(
-                            miner.errorMessage ?: "پاسخ دریافت نشد",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                        Text(miner.ip, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    } else {
-                        MiniInfoLine(Icons.Filled.Shield, miner.poolWorkerName ?: miner.ip, bold = true)
-                        MiniInfoLine(Icons.Filled.Speed, miner.ghsAverageThs?.let { "%.1f TH/s".format(it) } ?: "—")
-                        MiniInfoLine(Icons.Filled.SettingsEthernet, "MAC: ${miner.macAddress ?: "—"}")
-                        MiniInfoLine(Icons.Filled.Dns, "IP: ${miner.ip}")
-                    }
+            // کادر رنگی آیکون دستگاه + نقطهٔ وضعیت گوشهٔ آن
+            Box(modifier = Modifier.size(56.dp)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(accentColor.copy(alpha = 0.10f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    MinerDeviceIcon(
+                        modifier = Modifier.size(36.dp),
+                        tint = accentColor
+                    )
                 }
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .size(13.dp)
+                        .clip(CircleShape)
+                        .background(
+                            when {
+                                !miner.isReachable -> Color(0xFFF44336)
+                                isLoading -> Color(0xFFFF9800)
+                                miner.isHealthy -> Color(0xFF4CAF50)
+                                else -> Color(0xFFF44336)
+                            }
+                        )
+                )
+            }
 
-                if (miner.isReachable) {
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(
-                            dailyUsdt?.let { "$${"%.2f".format(it)}" } ?: "—",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF4CAF50)
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (!miner.isReachable) {
+                    Text(
+                        miner.errorMessage ?: "پاسخ دریافت نشد",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 2
+                    )
+                    Text(
+                        miner.ip,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
+                    )
+                } else if (isLoading) {
+                    Text(
+                        miner.ip,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(12.dp),
+                            strokeWidth = 1.5.dp,
+                            color = Color(0xFFFF9800)
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            miner.averageTemperature?.let { "%.1f°C".format(it) } ?: "—",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = tempColor(miner.averageTemperature)
+                            "در حال خواندن اطلاعات از دستگاه...",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        HealthBadge(miner = miner, compact = true)
                     }
-                    Spacer(modifier = Modifier.width(6.dp))
-                    IconButton(
-                        onClick = onOpen,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary)
-                    ) {
-                        Icon(Icons.Filled.ChevronRight, contentDescription = "باز کردن", tint = Color.White)
+                } else {
+                    Text(
+                        miner.minerType ?: "WhatsMiner",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                    Text(
+                        miner.poolWorkerName ?: "Worker: —",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        MetricChip(
+                            icon = Icons.Filled.Speed,
+                            text = miner.ghsAverageThs?.let { "%.1f TH/s".format(it) } ?: "—",
+                            tint = Color(0xFF2196F3)
+                        )
+                        miner.averageTemperature?.let { temp ->
+                            MetricChip(
+                                icon = Icons.Filled.DeviceThermostat,
+                                text = "%.1f°C".format(temp),
+                                tint = tempColor(temp)
+                            )
+                        }
                     }
+                    Text(
+                        "IP: ${miner.ip}  •  MAC: ${miner.macAddress ?: "—"}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
+                    )
                 }
             }
+
+            if (miner.isReachable && !isLoading) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        dailyUsdt?.let { "$${"%.2f".format(it)}" } ?: "—",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF4CAF50)
+                    )
+                    Text(
+                        "درآمد روزانه",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    HealthBadge(miner = miner, compact = true)
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(
+                    Icons.Filled.ChevronRight,
+                    contentDescription = "باز کردن",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.size(20.dp)
+                )
+            }
         }
+    }
+}
+
+/** چیپ آماری کوچک (هش‌ریت/دما/...) با پس‌زمینه ملایم هم‌رنگ */
+@Composable
+fun MetricChip(icon: ImageVector, text: String, tint: Color) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(tint.copy(alpha = 0.10f))
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(11.dp), tint = tint)
+        Spacer(modifier = Modifier.width(3.dp))
+        Text(
+            text,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = tint,
+            maxLines = 1
+        )
     }
 }
 
@@ -621,23 +782,30 @@ fun MiniInfoLine(icon: ImageVector, text: String, bold: Boolean = false) {
 }
 
 /**
- * نشان سلامت دستگاه: اگر کد خطای فعالی نداشته باشد «عالی» و در غیر این صورت «اخطار (تعداد)»
+ * نشان سلامت دستگاه به‌صورت کپسول رنگی: اگر کد خطای فعالی نداشته باشد «عالی»
+ * و در غیر این صورت «اخطار (تعداد)»
  */
 @Composable
 fun HealthBadge(miner: MinerInfo, compact: Boolean = false) {
     val healthy = miner.isHealthy
     val color = if (healthy) Color(0xFF4CAF50) else Color(0xFFF44336)
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(color.copy(alpha = 0.12f))
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Icon(
             if (healthy) Icons.Filled.Favorite else Icons.Filled.Warning,
             contentDescription = null,
             tint = color,
-            modifier = Modifier.size(14.dp)
+            modifier = Modifier.size(if (compact) 11.dp else 13.dp)
         )
-        Spacer(modifier = Modifier.width(3.dp))
+        Spacer(modifier = Modifier.width(4.dp))
         Text(
             if (healthy) "عالی" else "اخطار (${miner.errorCodes.size})",
-            style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.bodyMedium,
+            style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
             color = color,
             fontWeight = FontWeight.Bold
         )

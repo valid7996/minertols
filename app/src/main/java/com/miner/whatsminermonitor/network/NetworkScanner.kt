@@ -11,23 +11,37 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.net.Inet4Address
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.nio.ByteBuffer
 
 /**
  * ابزار پیدا کردن رنج IP شبکه محلی (وای‌فای) دستگاه و اسکن آن رنج برای پیدا کردن
  * ماینرهایی که پورت API آن‌ها (4028) باز است.
  *
- * بهبودهای سازگاری:
- * - جستجوی WiFi در بین تمام شبکه‌ها (نه فقط activeNetwork) برای زمانی که گوشی هم‌زمان
- *   به داده موبایل و WiFi متصل است یا activeNetwork موقتا cellular است
- * - تایم‌اوت پورت‌اسکن افزایش یافته (400ms -> 800ms) چون بعضی مدل‌ها/فریمورها زیر بار
- *   با تاخیر بیشتری به SYN پاسخ می‌دهند و با 400ms به‌اشتباه «پورت بسته» تشخیص داده می‌شدند
- * - قابلیت تشخیص ساب‌نت‌های غیر /24 با محدودسازی هوشمند (از /24 بزرگ‌تر نشود اما کوچک‌تر حفظ شود)
- * - لاگ‌های تشخیصی برای عیب‌یابی دستگاه‌های پیدانشده
+ * رفع باگ «پیدا نشدن / خیلی دیر پیدا شدن ماینرها و نیاز به خاموش/روشن کردن اسکنر»:
+ * - همزمانی اسکن با Semaphore روی ۲۵ پروبِ همزمان محدود شد (بازهٔ مجاز ۲۰ تا ۳۰) تا
+ *   صف سوکت سیستم‌عامل و جدول NAT روتر اشباع نشود؛ اشباع صف باعث drop بسته‌های SYN و
+ *   جا افتادن ماینرها می‌شد.
+ * - هر پروب با Socket().use { ... } باز و «قطعاً» بسته می‌شود؛ حتی وقتی connect خطا
+ *   می‌دهد یا coroutine لغو می‌شود (توقف اسکن) سوکت بسته می‌شود و Socket Leak رخ
+ *   نمی‌دهد؛ لکِ سوکت باعث می‌شد اسکن‌های بعدی تا ری‌استارت برنامه از کار بیفتند.
+ * - تایم‌اوت اتصال/خواندن هر پروب ۹۰۰ms (بازهٔ مجاز ۸۵۰ تا ۱۰۰۰) برای پورت 4028؛
+ *   مقدار قبلی (۸۰۰ms و کمتر) فریمورهای زیر بار را به‌اشتباه «غایب» گزارش می‌کرد.
+ * - هر دو پورت API (4028 قدیمی و 4433 جدید M5x/M6x) بررسی می‌شوند؛ اول 4028 تا
+ *   اکثر مدل‌ها سریع‌تر پیدا شوند.
+ * - به محض باز بودن پورت هر IP، callback صدا زده می‌شود و نتیجه فوراً به لیست UI
+ *   می‌رود؛ هیچ انتظاری برای اتمام کل بازهٔ IPها کشیده نمی‌شود.
  */
 object NetworkScanner {
 
-    private const val MAX_CONCURRENT_SCANS = 32
+    // بازهٔ مجاز ۲۰ تا ۳۰ اتصال همزمان؛ ۲۵ نقطهٔ تعادل خوبی بین سرعت اسکن و
+    // اشباع نشدن صف سوکت سیستم‌عامل / جدول NAT روترهای خانگی است
+    private const val MAX_CONCURRENT_PROBES = 25
+
+    // تایم‌اوت اتصال و خواندن برای پروب پورت 4028 (بازهٔ مجاز ۸۵۰ تا ۱۰۰۰ میلی‌ثانیه)
+    private const val SCAN_TIMEOUT_MS = 900
+
     private const val TAG = "NetworkScanner"
 
     /**
@@ -89,9 +103,6 @@ object NetworkScanner {
         // Keep small subnets as-is (e.g., /25 -> 126 hosts), cap large subnets to /24 (254 hosts)
         // maxOf(28,24)=28 => keeps /28 (14 hosts) - correct. maxOf(16,24)=24 => caps /16 to /24 - correct.
         val cappedPrefix = maxOf(prefixLength, 24)
-        // For very small networks like /28, use original prefix (28) not 24, to avoid scanning outside subnet
-        // Wait: maxOf(28,24)=28 => keeps /28 (14 hosts) - correct. maxOf(16,24)=24 => caps /16 to /24 - correct.
-        // So use cappedPrefix.
         val ipInt = ByteBuffer.wrap(address.address).int
         val mask = if (cappedPrefix == 0) 0 else -1 shl (32 - cappedPrefix)
         val network = ipInt and mask
@@ -117,27 +128,66 @@ object NetworkScanner {
     }
 
     /**
-     * روی تمام هاست‌های داده شده به صورت موازی (با محدودیت همزمانی) چک می‌کند پورت API باز است یا نه.
-     * برای هر IP که ماینر پیدا شد بلافاصله callback صدا زده می‌شود تا UI به صورت زنده آپدیت شود.
-     * بهبود: همزمانی کمتر (32 به‌جای 48) تا روترهای خانگی/سوییچ‌های کوچک زیر بار نماند و
-     * دستگاه‌های کندتر هم فرصت پاسخ داشته باشند.
+     * پروب TCP باز بودن پورت با باز/بستن قطعی سوکت.
+     * Socket().use حتی در صورت خطای connect یا لغو coroutine سوکت را می‌بندد (بدون Socket Leak).
+     * soTimeout هم همان ۹۰۰ms تنظیم می‌شود؛ پروب فقط connect می‌کند ولی برای اطمینان از
+     * عدم قفل شدن، تایم‌اوت خواندن هم ست می‌شود.
+     */
+    private fun probePort(ip: String, port: Int): Boolean {
+        return try {
+            Socket().use { socket ->
+                socket.soTimeout = SCAN_TIMEOUT_MS
+                socket.tcpNoDelay = true
+                socket.connect(InetSocketAddress(ip, port), SCAN_TIMEOUT_MS)
+                true
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "probe failed ip=$ip port=$port err=${e.javaClass.simpleName}: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * روی تمام هاست‌های داده شده به صورت موازی (با محدودیت دقیق همزمانی) چک می‌کند
+     * پورت API باز است یا نه. برای هر IP که ماینر پیدا شد «بلافاصله» callback صدا زده
+     * می‌شود تا UI به صورت زنده آپدیت شود.
+     *
+     * - سقف همزمانی روی «تعداد پروب‌های همزمان» اعمال می‌شود (Semaphore ۲۵)، پس هر لحظه
+     *   حداکثر ۲۵ سوکت باز داریم؛ نه بیشتر. این همان کاری است که از اشباع صف سوکت
+     *   سیستم‌عامل و جا افتادن ماینرها جلوگیری می‌کند.
+     * - هر IP حداکثر یک‌بار گزارش می‌شود حتی اگر هر دو پورت (4028 و 4433) باز باشند.
+     * - stopScan و لغو اسکن به‌صورت طبیعی همهٔ پروب‌های در انتظار را لغو می‌کند.
      */
     suspend fun scanForMiners(
         hosts: List<String>,
         onMinerFound: suspend (String) -> Unit
     ) = coroutineScope {
-        val semaphore = Semaphore(MAX_CONCURRENT_SCANS)
-        val jobs = hosts.map { ip ->
+        val semaphore = Semaphore(MAX_CONCURRENT_PROBES)
+        val reported = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+        val startTime = System.currentTimeMillis()
+
+        // اول همهٔ پروب‌های پورت 4028 (پورت اصلی اکثر مدل‌ها) و بعد پورت 4433 (API v3)
+        // تا ماینرهای رایج در نخستین موج اسکن پیدا شوند
+        val probes = hosts.map { it to WhatsminerClient.API_PORT } +
+                hosts.map { it to WhatsminerClient.API_PORT_V3 }
+
+        probes.map { (ip, port) ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
-                    // Check both old (4028) and new (4433) API ports for M2x-M6x full coverage
-                    if (WhatsminerClient.isAnyPortOpen(ip, timeoutMs = 800)) {
-                        Log.d(TAG, "miner port open detected ip=$ip (4028 or 4433)")
-                        onMinerFound(ip)
+                    if (!reported.contains(ip)) {
+                        if (probePort(ip, port)) {
+                            Log.d(TAG, "miner port open detected ip=$ip port=$port")
+                            // به‌محض اولین پاسخ مثبت، نتیجه به UI اعلام می‌شود؛ اگر بعداً
+                            // پورت دوم هم باز شد، به‌خاطر reported دوباره گزارش نمی‌شود
+                            if (reported.add(ip)) {
+                                onMinerFound(ip)
+                            }
+                        }
                     }
                 }
             }
-        }
-        jobs.awaitAll()
+        }.awaitAll()
+
+        Log.d(TAG, "scanForMiners finished ${hosts.size} hosts in ${System.currentTimeMillis() - startTime}ms, found=${reported.size}")
     }
 }
