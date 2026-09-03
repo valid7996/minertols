@@ -173,17 +173,15 @@ object NetworkScanner {
 
         probes.map { (ip, port) ->
             async(Dispatchers.IO) {
-                semaphore.withPermit {
-                    if (!reported.contains(ip)) {
-                        if (probePort(ip, port)) {
-                            Log.d(TAG, "miner port open detected ip=$ip port=$port")
-                            // به‌محض اولین پاسخ مثبت، نتیجه به UI اعلام می‌شود؛ اگر بعداً
-                            // پورت دوم هم باز شد، به‌خاطر reported دوباره گزارش نمی‌شود
-                            if (reported.add(ip)) {
-                                onMinerFound(ip)
-                            }
-                        }
-                    }
+                // سهمیهٔ همزمانی فقط برای «پروب پورت» رزرو می‌شود (حداکثر ۲۵ سوکت همزمان)؛
+                // خواندن کامل اطلاعات دستگاه (queryMiner داخل callback) که چند ثانیه طول
+                // می‌کشد «خارج از سهمیه» اجرا می‌شود تا اسکن بقیه IPها را بند نیاورد
+                val opened = semaphore.withPermit { !reported.contains(ip) && probePort(ip, port) }
+                // به‌محض اولین پاسخ مثبت، نتیجه به UI اعلام می‌شود؛ اگر بعداً
+                // پورت دوم هم باز شد، به‌خاطر reported دوباره گزارش نمی‌شود
+                if (opened && reported.add(ip)) {
+                    Log.d(TAG, "miner port open detected ip=$ip port=$port")
+                    onMinerFound(ip)
                 }
             }
         }.awaitAll()

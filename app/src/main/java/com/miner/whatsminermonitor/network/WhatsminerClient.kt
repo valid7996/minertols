@@ -7,7 +7,11 @@ import com.miner.whatsminermonitor.model.MinerDiagnostics
 import com.miner.whatsminermonitor.model.MinerInfo
 import com.miner.whatsminermonitor.model.PoolEntry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -31,6 +35,23 @@ data class PrivilegedResult(
 private data class TokenInfo(val time: String, val salt: String, val newSalt: String)
 
 /**
+ * پاسخ‌های خام همهٔ endpointهای یک دستگاه که به‌صورت موازی خوانده می‌شوند
+ * (خروجی مرحله دوم queryMiner؛ محتوای هر فیلد دقیقاً همان متغیرهای قبلی است)
+ */
+private data class QueryRawResponses(
+    val devsRoot: JSONObject?,
+    val statsRoot: JSONObject?,
+    val versionRoot: JSONObject?,
+    val devDetailsRoot: JSONObject?,
+    val psuRoot: JSONObject?,
+    val minerInfoRoot: JSONObject?,
+    val poolsRoot: JSONObject?,
+    val v3StatusRoot: JSONObject?,
+    val v3DeviceInfoRoot: JSONObject?,
+    val errorRoot: JSONObject?
+)
+
+/**
  * کلاینت ارتباط با API دستگاه Whatsminer روی پورت TCP 4028
  * بر اساس مستندات رسمی MicroBT (Whatsminer API v2.0.5):
  *  - همه دستورها با کلید "cmd" ارسال می‌شوند (نه "command")
@@ -48,6 +69,9 @@ object WhatsminerClient {
     const val API_PORT_V3 = 4433
     private const val CONNECT_TIMEOUT_MS = 3500
     private const val READ_TIMEOUT_MS = 4000
+    // حداکثر اتصال همزمان به «هر دستگاه» هنگام خواندن موازی endpointها؛ سقف پایین نگه داشته
+    // شده تا کنترل‌برد دستگاه زیر بار اتصال‌های همزمان خسته نشود
+    private const val MAX_PARALLEL_QUERIES_PER_DEVICE = 4
     private const val TAG = "WhatsminerClient"
 
     suspend fun isPortOpen(ip: String, timeoutMs: Int = 800, port: Int = API_PORT): Boolean = withContext(Dispatchers.IO) {
@@ -416,16 +440,51 @@ object WhatsminerClient {
             Log.d(TAG, "queryMiner SUMMARY keys ip=$ip ${summaryObj.keys().asSequence().toList().joinToString()} rawPreview=${summaryObj.toString().take(400)}")
         }
 
-        // جمع‌آوری بقیه endpointها با تاخیر کوتاه
-        delay(70)
-        if (devsRoot == null) devsRoot = fetchDevs(ip)
+        // جمع‌آوری بقیه endpointها به‌صورت «موازی» با سقف ۴ اتصال همزمان به هر دستگاه.
+        // قبلاً این ۱۰ درخواست پشت‌سرهم با مکث ۷۰ میلی‌ثانیه‌ای بین هرکدام خوانده می‌شد و
+        // همین باعث می‌شد مرحله «در حال خواندن اطلاعات» برای هر دستگاه چند ثانیه طول بکشد.
+        // نام و محتوای همهٔ متغیرهای خروجی دقیقاً مثل قبل است؛ فقط جمع‌آوری موازی شده است.
+        val raw = coroutineScope {
+            val perDevice = Semaphore(MAX_PARALLEL_QUERIES_PER_DEVICE)
+            val devs = async { perDevice.withPermit { devsRoot ?: fetchDevs(ip) } }
+            val stats = async { perDevice.withPermit { statsRoot ?: fetchStats(ip) } }
+            val version = async { perDevice.withPermit { fetchVersion(ip) } }
+            val devDetails = async { perDevice.withPermit { fetchDevDetails(ip) } }
+            val psu = async { perDevice.withPermit { fetchPsu(ip) } }
+            val minerInfo = async { perDevice.withPermit { fetchMinerInfo(ip) } }
+            val pools = async { perDevice.withPermit { fetchPools(ip) } }
+            val v3Status = async { perDevice.withPermit { fetchMinerStatusV3(ip, "summary+pools+edevs") } }
+            val v3DeviceInfo = async { perDevice.withPermit { fetchDeviceInfoV3(ip) } }
+            val error = async { perDevice.withPermit { fetchErrorCode(ip) } }
+            QueryRawResponses(
+                devsRoot = devs.await(),
+                statsRoot = stats.await(),
+                versionRoot = version.await(),
+                devDetailsRoot = devDetails.await(),
+                psuRoot = psu.await(),
+                minerInfoRoot = minerInfo.await(),
+                poolsRoot = pools.await(),
+                v3StatusRoot = v3Status.await(),
+                v3DeviceInfoRoot = v3DeviceInfo.await(),
+                errorRoot = error.await()
+            )
+        }
+        devsRoot = raw.devsRoot
+        statsRoot = raw.statsRoot
+        val versionRoot = raw.versionRoot
+        val devDetailsRoot = raw.devDetailsRoot
+        val psuRoot = raw.psuRoot
+        val minerInfoRoot = raw.minerInfoRoot
+        val poolsRoot = raw.poolsRoot
+        val v3StatusRoot = raw.v3StatusRoot
+        val v3DeviceInfoRoot = raw.v3DeviceInfoRoot
+        val errorRoot = raw.errorRoot
+
         val devsArray = getArrayCaseInsensitive(devsRoot, "DEVS")
             ?: getArrayCaseInsensitive(devsRoot, "devs")
         if (devsRoot != null && devsArray == null) Log.d(TAG, "DEVS array not found ip=$ip keys=${devsRoot.keys().asSequence().toList().joinToString()}")
         else if (devsArray != null) Log.d(TAG, "DEVS found ip=$ip count=${devsArray.length()}")
 
-        delay(70)
-        if (statsRoot == null) statsRoot = fetchStats(ip)
         val statsObj = firstArrayObject(statsRoot, "STATS")
             ?: firstArrayObject(statsRoot, "Stats")
             ?: findObjectCaseInsensitive(statsRoot, "STATS")
@@ -433,49 +492,33 @@ object WhatsminerClient {
             ?: statsRoot?.optJSONObject("Stats")
         if (statsRoot != null) Log.d(TAG, "STATS ip=$ip available=${statsObj != null} keys=${statsObj?.keys()?.asSequence()?.toList()?.joinToString() ?: statsRoot.keys().asSequence().toList().joinToString()}")
 
-        delay(70)
-        val versionRoot = fetchVersion(ip)
         val versionMsg = versionRoot?.optJSONObject("Msg") ?: versionRoot?.optJSONObject("msg") ?: findObjectCaseInsensitive(versionRoot, "Msg")
         if (versionRoot != null && versionMsg == null) Log.d(TAG, "version Msg not found ip=$ip rootKeys=${versionRoot.keys().asSequence().toList()}")
 
-        delay(70)
-        val devDetailsRoot = fetchDevDetails(ip)
         val devDetailsObj = firstArrayObject(devDetailsRoot, "DEVDETAILS")
             ?: firstArrayObject(devDetailsRoot, "DevDetails")
             ?: findObjectCaseInsensitive(devDetailsRoot, "DEVDETAILS")
 
-        delay(70)
-        val psuRoot = fetchPsu(ip)
         val psuMsg = psuRoot?.optJSONObject("Msg") ?: psuRoot?.optJSONObject("msg") ?: findObjectCaseInsensitive(psuRoot, "Msg")
         if (psuRoot != null) Log.d(TAG, "PSU ip=$ip msgKeys=${psuMsg?.keys()?.asSequence()?.toList()?.joinToString() ?: psuRoot.keys().asSequence().toList().joinToString()}")
 
-        delay(70)
-        val minerInfoRoot = fetchMinerInfo(ip)
         val minerInfoMsg = minerInfoRoot?.optJSONObject("Msg") ?: minerInfoRoot?.optJSONObject("msg") ?: findObjectCaseInsensitive(minerInfoRoot, "Msg")
 
-        delay(70)
-        val poolsRoot = fetchPools(ip)
         val poolObj = firstArrayObject(poolsRoot, "POOLS") ?: firstArrayObject(poolsRoot, "Pools") ?: findObjectCaseInsensitive(poolsRoot, "POOLS")
         val poolsArray = getArrayCaseInsensitive(poolsRoot, "POOLS") ?: getArrayCaseInsensitive(poolsRoot, "Pools")
 
         // === API v3 (port 4433) for M50/M60/M60S new firmware ===
-        delay(70)
-        val v3StatusRoot = fetchMinerStatusV3(ip, "summary+pools+edevs")
         val v3Msg = v3StatusRoot?.optJSONObject("msg") ?: v3StatusRoot?.optJSONObject("Msg") ?: findObjectCaseInsensitive(v3StatusRoot, "msg")
         val v3Summary = v3Msg?.optJSONObject("summary") ?: findObjectCaseInsensitive(v3Msg, "summary")
         val v3PoolsArray = v3Msg?.optJSONArray("pools") ?: findArrayCaseInsensitive(v3Msg ?: JSONObject(), "pools")
         val v3EdevsArray = v3Msg?.optJSONArray("edevs") ?: findArrayCaseInsensitive(v3Msg ?: JSONObject(), "edevs")
         if (v3StatusRoot != null) Log.d(TAG, "V3 status ip=$ip v3Summary=${v3Summary != null} v3Pools=${v3PoolsArray?.length() ?: 0} v3Edevs=${v3EdevsArray?.length() ?: 0}")
-        delay(70)
-        val v3DeviceInfoRoot = fetchDeviceInfoV3(ip)
         val v3DeviceMsg = v3DeviceInfoRoot?.optJSONObject("msg") ?: v3DeviceInfoRoot?.optJSONObject("Msg") ?: findObjectCaseInsensitive(v3DeviceInfoRoot, "msg")
         val v3PowerObj = v3DeviceMsg?.optJSONObject("power") ?: findObjectCaseInsensitive(v3DeviceMsg, "power")
         val v3MinerObj = v3DeviceMsg?.optJSONObject("miner") ?: findObjectCaseInsensitive(v3DeviceMsg, "miner")
         val v3SystemObj = v3DeviceMsg?.optJSONObject("system") ?: findObjectCaseInsensitive(v3DeviceMsg, "system")
         if (v3DeviceInfoRoot != null) Log.d(TAG, "V3 deviceInfo ip=$ip power=${v3PowerObj != null} minerType=${v3MinerObj?.optString("type")}")
 
-        delay(70)
-        val errorRoot = fetchErrorCode(ip)
         val errorCodes = parseErrorCodes(errorRoot)
         // Also try v3 error-code as fallback (new API: msg.error-code = [{"531":"...","reason":"Slot1 not found."}])
         val v3ErrorArr = v3DeviceMsg?.optJSONArray("error-code") ?: findArrayCaseInsensitive(v3DeviceMsg ?: JSONObject(), "error-code")

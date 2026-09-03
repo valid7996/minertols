@@ -8,13 +8,17 @@ import com.miner.whatsminermonitor.network.NetworkScanner
 import com.miner.whatsminermonitor.network.WhatsminerClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -56,6 +60,9 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
 
     private val listMutex = Mutex()
 
+    // سقف رفرش همزمان دستگاه‌ها در حلقهٔ آمار زنده (۶ دستگاه × حداکثر ۴ اتصال داخلی queryMiner)
+    private val liveRefreshPermits = Semaphore(6)
+
     // نگه‌داری Job اسکن پیوسته تا بشه با دکمه توقف، لغوش کرد
     private var scanJob: Job? = null
 
@@ -94,14 +101,23 @@ class MinerViewModel(application: Application) : AndroidViewModel(application) {
             while (true) {
                 delay(MINER_LIVE_REFRESH_INTERVAL_MS)
                 val ips = _miners.value.map { it.ip }
-                for (ip in ips) {
-                    try {
-                        val info = WhatsminerClient.queryMiner(ip)
-                        listMutex.withLock {
-                            _miners.value = _miners.value.map { if (it.ip == ip) info else it }
+                // دستگاه‌ها به‌صورت «موازی» رفرش می‌شوند (سقف ۶ دستگاه همزمان) تا آمار زندهٔ
+                // فن/دما/هش‌ریت سر وقت به‌روز شود؛ نسخهٔ قبلی پشت‌سرهم بود و با چند دستگاه،
+                // هر دور رفرش بیش از یک دقیقه طول می‌کشید و مقادیر روی صفحه ثابت به نظر می‌رسیدند
+                coroutineScope {
+                    ips.map { ip ->
+                        async {
+                            liveRefreshPermits.withPermit {
+                                try {
+                                    val info = WhatsminerClient.queryMiner(ip)
+                                    listMutex.withLock {
+                                        _miners.value = _miners.value.map { if (it.ip == ip) info else it }
+                                    }
+                                } catch (e: Exception) {
+                                    android.util.Log.e("MinerViewModel", "live refresh exception for $ip", e)
+                                }
+                            }
                         }
-                    } catch (e: Exception) {
-                        android.util.Log.e("MinerViewModel", "live refresh exception for $ip", e)
                     }
                 }
             }
