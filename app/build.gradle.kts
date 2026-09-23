@@ -15,6 +15,17 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        create("release") {
+            // keystore امضای Narcic MT (PKCS12، صد سال اعتبار، همراه ریپو)
+            storeFile = file("narcic-release.keystore")
+            storePassword = "NarcicMT2026!Key"
+            storeType = "PKCS12"
+            keyAlias = "narcic"
+            keyPassword = "NarcicMT2026!Key"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -22,6 +33,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 

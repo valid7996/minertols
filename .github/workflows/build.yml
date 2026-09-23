@@ -36,9 +36,21 @@ jobs:
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
 
-      - name: Upload APK
+      # APK ریلز امضاشده (keystore داخل ریپو) — روی همه پردازنده‌ها نصب می‌شود
+      # (arm64-v8a / armeabi-v7a / x86 / x86_64) چون برنامه کد نیتیو ندارد
+      - name: Build signed release APK
+        run: gradle assembleRelease --stacktrace
+
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: whatsminer-monitor-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload signed release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: narcic-mt-release-apk-signed
+          path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
