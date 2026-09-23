@@ -5,40 +5,55 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.*
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.*
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.foundation.Image
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -63,6 +78,7 @@ import kotlinx.coroutines.launch
 import java.net.URLEncoder
 import java.text.NumberFormat
 import java.util.Locale
+import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.roundToLong
 import kotlin.math.sin
@@ -72,8 +88,19 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             WhatsminerMonitorTheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    AppNavHost()
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.background)
+                ) {
+                    // پس‌زمینهٔ شفق متحرک پشت همهٔ صفحه‌ها
+                    AnimatedAuroraBackground()
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = Color.Transparent
+                    ) {
+                        AppNavHost()
+                    }
                 }
             }
         }
@@ -104,9 +131,143 @@ fun AppNavHost(viewModel: MinerViewModel = viewModel()) {
 }
 
 // ==================================================================================
+// کیت بصری مشترک
+// ==================================================================================
+
+/** پس‌زمینهٔ متحرک: هاله‌های نورانی رنگی که بسیار آرام روی زمینه حرکت می‌کنند */
+@Composable
+fun AnimatedAuroraBackground(modifier: Modifier = Modifier) {
+    val dark = isSystemInDarkTheme()
+    val baseTop = if (dark) Color(0xFF0A0F16) else Color(0xFFF4F7FB)
+    val baseBottom = if (dark) Color(0xFF0D1420) else Color(0xFFECF1F8)
+    val orbAlpha = if (dark) 0.14f else 0.20f
+    val cAmber = Color(0xFFFFB350)
+    val cCyan = Color(0xFF38BDF8)
+    val cViolet = Color(0xFF8B5CF6)
+
+    val transition = rememberInfiniteTransition(label = "aurora")
+    val a1 by transition.animateFloat(
+        0f, (2f * PI).toFloat(),
+        infiniteRepeatable(tween(26000, easing = LinearEasing)), label = "a1"
+    )
+    val a2 by transition.animateFloat(
+        0f, (2f * PI).toFloat(),
+        infiniteRepeatable(tween(34000, easing = LinearEasing)), label = "a2"
+    )
+    val a3 by transition.animateFloat(
+        0f, (2f * PI).toFloat(),
+        infiniteRepeatable(tween(41000, easing = LinearEasing)), label = "a3"
+    )
+
+    Canvas(modifier.fillMaxSize()) {
+        drawRect(Brush.verticalGradient(listOf(baseTop, baseBottom)))
+        // هالهٔ کهربایی بالا-چپ
+        val c1 = Offset(size.width * (0.22f + 0.10f * sin(a1)), size.height * (0.12f + 0.07f * cos(a1)))
+        drawCircle(
+            brush = Brush.radialGradient(listOf(cAmber.copy(alpha = orbAlpha), Color.Transparent), center = c1, radius = size.width * 0.55f),
+            radius = size.width * 0.55f,
+            center = c1
+        )
+        // هالهٔ فیروزه‌ای راست
+        val c2 = Offset(size.width * (0.85f + 0.08f * cos(a2)), size.height * (0.30f + 0.10f * sin(a2)))
+        drawCircle(
+            brush = Brush.radialGradient(listOf(cCyan.copy(alpha = orbAlpha * 0.8f), Color.Transparent), center = c2, radius = size.width * 0.50f),
+            radius = size.width * 0.50f,
+            center = c2
+        )
+        // هالهٔ بنفش پایین
+        val c3 = Offset(size.width * (0.45f + 0.12f * sin(a3)), size.height * (0.92f + 0.05f * cos(a3)))
+        drawCircle(
+            brush = Brush.radialGradient(listOf(cViolet.copy(alpha = orbAlpha * 0.7f), Color.Transparent), center = c3, radius = size.width * 0.60f),
+            radius = size.width * 0.60f,
+            center = c3
+        )
+    }
+}
+
+/** کارت با پس‌زمینهٔ نیمه‌شفاف و حاشیهٔ گرادیانی محو (حس شیشه‌ای روی پس‌زمینهٔ متحرک) */
+@Composable
+fun GlassCard(
+    modifier: Modifier = Modifier,
+    shape: Shape = RoundedCornerShape(20.dp),
+    container: Color = MaterialTheme.colorScheme.surface.copy(alpha = 0.78f),
+    borderColor: Color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Card(
+        modifier = modifier.border(
+            width = 1.dp,
+            brush = Brush.linearGradient(
+                listOf(borderColor, borderColor.copy(alpha = 0.10f), borderColor),
+                start = Offset.Zero,
+                end = Offset.Infinite
+            ),
+            shape = shape
+        ),
+        shape = shape,
+        colors = CardDefaults.cardColors(containerColor = container),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        content = content
+    )
+}
+
+/** نقطهٔ وضعیت تپنده (هالهٔ بیرونی نفس می‌کشد) */
+@Composable
+fun PulsingDot(color: Color, modifier: Modifier = Modifier, pulsing: Boolean = true, dotSize: Dp = 13.dp) {
+    val t = rememberInfiniteTransition(label = "pulse")
+    val p by t.animateFloat(0f, 1f, infiniteRepeatable(tween(1500, easing = LinearEasing)), label = "p")
+    Box(modifier = modifier.size(dotSize), contentAlignment = Alignment.Center) {
+        if (pulsing) {
+            Box(
+                Modifier
+                    .size(dotSize)
+                    .scale(1f + p * 1.4f)
+                    .alpha((1f - p) * 0.55f)
+                    .clip(CircleShape)
+                    .background(color)
+            )
+        }
+        Box(Modifier.size(dotSize * 0.62f).clip(CircleShape).background(color))
+    }
+}
+
+/** درخشش رد شونده برای جای‌نگهدارِ بارگذاری */
+@Composable
+fun Modifier.shimmer(): Modifier {
+    val t = rememberInfiniteTransition(label = "shimmer")
+    val x by t.animateFloat(-1f, 2f, infiniteRepeatable(tween(1200, easing = LinearEasing)), label = "x")
+    val base = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+    val hi = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.22f)
+    return drawBehind {
+        drawRect(base)
+        drawRect(
+            Brush.linearGradient(
+                listOf(Color.Transparent, hi, Color.Transparent),
+                start = Offset(size.width * x, 0f),
+                end = Offset(size.width * (x + 1f), size.height)
+            )
+        )
+    }
+}
+
+/** تیتر بخش با نوار رنگی عمودی */
+@Composable
+fun SectionHeader(text: String, tint: Color = MaterialTheme.colorScheme.primary) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
+        Box(
+            Modifier
+                .size(width = 4.dp, height = 16.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(Brush.verticalGradient(listOf(tint, tint.copy(alpha = 0.30f))))
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(text, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = tint)
+    }
+}
+
+// ==================================================================================
 // صفحه اصلی: خلاصه (درآمد روزانه / گیج هشریت کل / تعداد ماینرها) + لیست دستگاه‌ها
-// بازطراحی مدرن: نوار وضعیت اسکن با نشانگر زنده، کارت خلاصه با کاشی‌های رنگی و
-// کارت‌های ماینر با آیکون رنگی + نقطهٔ وضعیت + چیپ‌های آماری
+// بازطراحی: هدر گرادیانی، پس‌زمینهٔ شفق متحرک، کارت‌های شیشه‌ای، FAB گرادیانی
 // ==================================================================================
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -128,18 +289,42 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
     var showCalculator by remember { mutableStateOf(false) }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = Color.Transparent,
         topBar = {
-            TopAppBar(
-                title = {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
                     Text(
                         "مانیتور ماینرهای Whatsminer",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            brush = Brush.linearGradient(
+                                listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.secondary),
+                                start = Offset.Zero,
+                                end = Offset.Infinite
+                            )
+                        )
                     )
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
-                actions = {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        "داشبورد پایش زندهٔ مزرعه",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                // دکمهٔ محاسبه‌گر در قاب شیشه‌ای
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), CircleShape)
+                ) {
                     IconButton(onClick = { showCalculator = true }) {
                         Icon(
                             Icons.Filled.Calculate,
@@ -148,23 +333,38 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
                         )
                     }
                 }
-            )
+            }
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { if (isScanning) viewModel.stopScan() else viewModel.startScan() },
-                shape = RoundedCornerShape(16.dp),
-                containerColor = if (isScanning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                contentColor = Color.White,
-                icon = {
-                    if (isScanning) {
-                        Icon(Icons.Filled.Stop, contentDescription = null)
-                    } else {
-                        Icon(Icons.Filled.Search, contentDescription = null)
-                    }
-                },
-                text = { Text(if (isScanning) "توقف اسکن" else "اسکن شبکه", fontWeight = FontWeight.Bold) }
-            )
+            // FAB گرادیانی با درخشش
+            val gradBrush = if (isScanning) {
+                Brush.linearGradient(listOf(Color(0xFFFF7043), Color(0xFFE53935)))
+            } else {
+                Brush.linearGradient(listOf(Color(0xFFFFB350), Color(0xFFF57C00)))
+            }
+            Box(
+                modifier = Modifier
+                    .shadow(16.dp, RoundedCornerShape(18.dp))
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(gradBrush)
+                    .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(18.dp))
+                    .clickable { if (isScanning) viewModel.stopScan() else viewModel.startScan() }
+                    .padding(horizontal = 22.dp, vertical = 14.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        if (isScanning) Icons.Filled.Stop else Icons.Filled.Search,
+                        contentDescription = null,
+                        tint = Color.White
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        if (isScanning) "توقف اسکن" else "اسکن شبکه",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
@@ -223,32 +423,44 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
  */
 @Composable
 fun ScanStatusBanner(status: String?, isScanning: Boolean) {
-    if (status == null) return
-    Row(
-        modifier = Modifier
-            .padding(horizontal = 16.dp, vertical = 6.dp)
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(
-                if (isScanning) Color(0xFF2196F3).copy(alpha = 0.10f)
-                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-            )
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
+    AnimatedVisibility(
+        visible = status != null,
+        enter = expandVertically() + fadeIn(),
+        exit = shrinkVertically() + fadeOut()
     ) {
-        if (isScanning) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(14.dp),
-                strokeWidth = 2.dp,
-                color = Color(0xFF2196F3)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
+        if (status != null) {
+            Row(
+                modifier = Modifier
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(
+                        if (isScanning) MaterialTheme.colorScheme.secondary.copy(alpha = 0.12f)
+                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                    )
+                    .border(
+                        1.dp,
+                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        RoundedCornerShape(14.dp)
+                    )
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (isScanning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(
+                    status,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
         }
-        Text(
-            status,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurface
-        )
     }
 }
 
@@ -355,7 +567,24 @@ fun ProfitCalculatorDialog(
 
 @Composable
 fun EmptyState() {
+    // حلقه‌های رادار که مثل جستجوی شبکه بیرون می‌پرند
+    val t = rememberInfiniteTransition(label = "radar")
+    val pulse by t.animateFloat(0f, 1f, infiniteRepeatable(tween(2400, easing = LinearEasing)), label = "pulse")
+    val ringColor = MaterialTheme.colorScheme.primary
+
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Canvas(modifier = Modifier.size(300.dp)) {
+            val center = Offset(size.width / 2f, size.height / 2f)
+            for (i in 0..2) {
+                val phase = (pulse + i / 3f) % 1f
+                drawCircle(
+                    color = ringColor.copy(alpha = (1f - phase) * 0.22f),
+                    radius = size.minDimension * (0.12f + 0.38f * phase),
+                    center = center,
+                    style = Stroke(width = 2.dp.toPx())
+                )
+            }
+        }
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(24.dp)
@@ -364,14 +593,15 @@ fun EmptyState() {
                 modifier = Modifier
                     .size(96.dp)
                     .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)),
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.10f))
+                    .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     painter = painterResource(id = R.drawable.ic_wifi_wait),
                     contentDescription = null,
                     modifier = Modifier.size(46.dp),
-                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f)
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
                 )
             }
             Spacer(modifier = Modifier.height(16.dp))
@@ -396,6 +626,7 @@ fun EmptyState() {
 
 // ==================================================================================
 // کارت خلاصه بالای صفحه: درآمد روزانه | گیج هشریت کل | تعداد کل ماینرها
+// بازطراحی: کارت هیرو با گرادیان تیره، کاشی‌های شیشه‌ای، گیج درخشان متحرک
 // ==================================================================================
 @Composable
 fun SummaryHeader(
@@ -404,20 +635,35 @@ fun SummaryHeader(
     minerCount: Int,
     modifier: Modifier = Modifier
 ) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    Box(
+        modifier
+            .fillMaxWidth()
+            .shadow(16.dp, RoundedCornerShape(26.dp))
+            .clip(RoundedCornerShape(26.dp))
+            .background(
+                Brush.linearGradient(
+                    listOf(Color(0xFF151E2C), Color(0xFF18203A), Color(0xFF241B33)),
+                    start = Offset.Zero,
+                    end = Offset.Infinite
+                )
+            )
+            .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(26.dp))
     ) {
+        // واترمارک بیت‌کوین گوشهٔ کارت
+        Icon(
+            Icons.Filled.CurrencyBitcoin,
+            contentDescription = null,
+            tint = Color(0xFFFFB350).copy(alpha = 0.06f),
+            modifier = Modifier.align(Alignment.TopEnd).size(110.dp)
+        )
         Row(
             modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp, horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // درآمد روزانه
-            SummaryTile(
+            HeroTile(
                 icon = Icons.Filled.AttachMoney,
-                tint = Color(0xFF4CAF50),
+                tint = Color(0xFF4ADE80),
                 value = dailyUsdt?.let { "$${"%.2f".format(it)}" } ?: "—",
                 label = "درآمد روزانه",
                 modifier = Modifier.weight(0.85f)
@@ -437,16 +683,16 @@ fun SummaryHeader(
                 Text(
                     "مجموع هشریت ماینرها",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = Color(0xFFA9B4C6),
                     textAlign = TextAlign.Center,
                     modifier = Modifier.padding(top = 2.dp)
                 )
             }
 
             // تعداد کل ماینرها
-            SummaryTile(
+            HeroTile(
                 icon = Icons.Filled.Hub,
-                tint = Color(0xFF2196F3),
+                tint = Color(0xFF38BDF8),
                 value = "$minerCount",
                 label = "کل ماینرها",
                 modifier = Modifier.weight(0.85f)
@@ -455,9 +701,9 @@ fun SummaryHeader(
     }
 }
 
-/** کاشی رنگی داخل کارت خلاصه: آیکون داخل دایره + مقدار + برچسب */
+/** کاشی شیشه‌ای داخل کارت هیرو: آیکون داخل دایرهٔ رنگی + مقدار + برچسب */
 @Composable
-fun SummaryTile(
+fun HeroTile(
     icon: ImageVector,
     tint: Color,
     value: String,
@@ -467,7 +713,8 @@ fun SummaryTile(
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(18.dp))
-            .background(tint.copy(alpha = 0.10f))
+            .background(Color.White.copy(alpha = 0.06f))
+            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(18.dp))
             .padding(vertical = 12.dp, horizontal = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -475,18 +722,18 @@ fun SummaryTile(
             modifier = Modifier
                 .size(30.dp)
                 .clip(CircleShape)
-                .background(tint.copy(alpha = 0.16f)),
+                .background(tint.copy(alpha = 0.18f)),
             contentAlignment = Alignment.Center
         ) {
             Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(17.dp))
         }
         Spacer(modifier = Modifier.height(6.dp))
-        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFFF4F7FC))
         Spacer(modifier = Modifier.height(1.dp))
         Text(
             label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = Color(0xFFA9B4C6),
             textAlign = TextAlign.Center
         )
     }
@@ -494,6 +741,7 @@ fun SummaryTile(
 
 /**
  * گیج نیم‌دایره‌ای شبیه سرعت‌سنج که هشریت کل (TH/s) را نمایش می‌دهد
+ * بازطراحی: عقربه با انیمیشن نرم، کمان گرادیانی، تیک‌های مقیاس، هالهٔ نورانی مرکز
  */
 @Composable
 fun SpeedGauge(valueThs: Double, modifier: Modifier = Modifier) {
@@ -501,6 +749,18 @@ fun SpeedGauge(valueThs: Double, modifier: Modifier = Modifier) {
     val niceSteps = listOf(50.0, 100.0, 150.0, 200.0, 300.0, 400.0, 600.0, 800.0, 1000.0, 1500.0, 2000.0, 3000.0)
     val maxScale = niceSteps.firstOrNull { it >= valueThs * 1.25 } ?: (valueThs * 1.3).coerceAtLeast(50.0)
     val fraction = (valueThs / maxScale).coerceIn(0.0, 1.0)
+
+    // انیمیشن نرم عقربه و عدد هنگام تغییر مقدار
+    val animFraction by animateFloatAsState(
+        targetValue = fraction.toFloat(),
+        animationSpec = tween(800, easing = FastOutSlowInEasing),
+        label = "gaugeFraction"
+    )
+    val animValue by animateFloatAsState(
+        targetValue = valueThs.toFloat(),
+        animationSpec = tween(800, easing = FastOutSlowInEasing),
+        label = "gaugeValue"
+    )
 
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Canvas(modifier = modifier) {
@@ -510,18 +770,20 @@ fun SpeedGauge(valueThs: Double, modifier: Modifier = Modifier) {
             val topLeft = Offset(center.x - radius, center.y - radius)
             val boxSize = Size(radius * 2f, radius * 2f)
 
-            // کمان رنگی پس‌زمینه (آبی -> بنفش -> نارنجی -> قرمز)
-            drawArc(
-                brush = Brush.horizontalGradient(
-                    listOf(
-                        Color(0xFF2196F3),
-                        Color(0xFF9C27B0),
-                        Color(0xFFFF9800),
-                        Color(0xFFF44336)
-                    ),
-                    startX = topLeft.x,
-                    endX = topLeft.x + boxSize.width
+            // هالهٔ نورانی پشت مرکز
+            drawCircle(
+                brush = Brush.radialGradient(
+                    listOf(Color(0xFFFFB350).copy(alpha = 0.28f), Color.Transparent),
+                    center = center,
+                    radius = radius * 0.55f
                 ),
+                radius = radius * 0.55f,
+                center = center
+            )
+
+            // کمان پس‌زمینه (ریل خاکستری)
+            drawArc(
+                color = Color.White.copy(alpha = 0.10f),
                 startAngle = 180f,
                 sweepAngle = 180f,
                 useCenter = false,
@@ -530,8 +792,42 @@ fun SpeedGauge(valueThs: Double, modifier: Modifier = Modifier) {
                 style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
             )
 
+            // تیک‌های مقیاس هر ۳۰ درجه
+            for (i in 0..6) {
+                val ang = Math.toRadians((180.0 + i * 30.0))
+                val cosA = cos(ang).toFloat()
+                val sinA = sin(ang).toFloat()
+                val tick = strokeWidth * 0.42f
+                drawLine(
+                    color = Color.White.copy(alpha = 0.14f),
+                    start = Offset(center.x + radius * cosA, center.y + radius * sinA),
+                    end = Offset(center.x + (radius - tick) * cosA, center.y + (radius - tick) * sinA),
+                    strokeWidth = 2f,
+                    cap = StrokeCap.Round
+                )
+            }
+
+            // کمان مقدار: با چرخش ۱۸۰ درجه گرادیان sweep دقیقاً از ابتدای کمان شروع می‌شود
+            rotate(degrees = 180f, pivot = center) {
+                drawArc(
+                    brush = Brush.sweepGradient(
+                        0f to Color(0xFF38BDF8),
+                        0.45f to Color(0xFF4ADE80),
+                        0.75f to Color(0xFFFFB350),
+                        1f to Color(0xFFF43F5E),
+                        center = Offset(radius, radius)
+                    ),
+                    startAngle = 0f,
+                    sweepAngle = animFraction * 180f,
+                    useCenter = false,
+                    topLeft = Offset(center.x - radius, center.y - radius),
+                    size = boxSize,
+                    style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+                )
+            }
+
             // عقربه
-            val needleAngleDeg = 180.0 + fraction * 180.0
+            val needleAngleDeg = 180.0 + animFraction * 180.0
             val needleAngleRad = Math.toRadians(needleAngleDeg)
             val needleLength = radius - strokeWidth
             val needleEnd = Offset(
@@ -539,26 +835,29 @@ fun SpeedGauge(valueThs: Double, modifier: Modifier = Modifier) {
                 y = center.y + (needleLength * sin(needleAngleRad)).toFloat()
             )
             drawLine(
-                color = Color(0xFFFF9800),
+                color = Color(0xFFFFB350),
                 start = center,
                 end = needleEnd,
                 strokeWidth = strokeWidth * 0.3f,
                 cap = StrokeCap.Round
             )
-            drawCircle(color = Color(0xFF2C3E50), radius = strokeWidth * 0.55f, center = center)
+            // مرکز عقربه
+            drawCircle(color = Color(0xFFFFB350), radius = strokeWidth * 0.55f, center = center)
+            drawCircle(color = Color(0xFF101826), radius = strokeWidth * 0.30f, center = center)
         }
         Spacer(modifier = Modifier.height(2.dp))
         Row(verticalAlignment = Alignment.Bottom) {
             Text(
-                "%.1f".format(valueThs),
+                "%.1f".format(animValue),
                 style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFFF4F7FC)
             )
             Spacer(modifier = Modifier.width(3.dp))
             Text(
                 "TH/s",
                 style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
+                color = Color(0xFFFFB350),
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(bottom = 3.dp)
             )
@@ -581,7 +880,8 @@ fun MinerDeviceIcon(modifier: Modifier = Modifier, tint: Color = Color(0xFF3A3A3
 
 // ==================================================================================
 // کارت مدرن ماینر در لیست اصلی + دکمه باز کردن جزئیات
-// ساختار: کادر رنگی آیکون + نقطهٔ وضعیت | مشخصات با چیپ‌های آماری | درآمد + نشان سلامت
+// بازطراحی: افکت فشرده‌شدن هنگام لمس، حاشیهٔ گرادیانی هم‌رنگ وضعیت، نقطهٔ تپنده،
+// شیمر بارگذاری، چیپ‌های آماری نرم‌تر
 // (ردیف موقت بین «پورت باز شد» و «اطلاعات کامل خوانده شد» با نشانگر «در حال خواندن» نمایش داده می‌شود)
 // ==================================================================================
 @Composable
@@ -596,25 +896,51 @@ fun MinerListItem(miner: MinerInfo, btcPriceUsdt: Double?, networkHashrateEh: Do
         else -> MaterialTheme.colorScheme.primary
     }
 
+    // افکت فشرده شدن هنگام لمس
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val pressAnim by animateFloatAsState(if (pressed) 0.97f else 1f, label = "press")
+
+    val borderColor = when {
+        !miner.isReachable -> MaterialTheme.colorScheme.error.copy(alpha = 0.45f)
+        isLoading -> Color(0xFFFF9800).copy(alpha = 0.45f)
+        miner.isHealthy -> MaterialTheme.colorScheme.primary.copy(alpha = 0.40f)
+        else -> MaterialTheme.colorScheme.error.copy(alpha = 0.35f)
+    }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = miner.isReachable && !isLoading) { onOpen() },
+            .scale(pressAnim)
+            .border(
+                1.dp,
+                Brush.linearGradient(
+                    listOf(borderColor, borderColor.copy(alpha = 0.12f), borderColor),
+                    start = Offset.Zero,
+                    end = Offset.Infinite
+                ),
+                RoundedCornerShape(20.dp)
+            )
+            .clickable(
+                interactionSource = interaction,
+                indication = LocalIndication.current,
+                enabled = miner.isReachable && !isLoading
+            ) { onOpen() },
         shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // کادر رنگی آیکون دستگاه + نقطهٔ وضعیت گوشهٔ آن
+            // کادر رنگی آیکون دستگاه + نقطهٔ تپندهٔ وضعیت گوشهٔ آن
             Box(modifier = Modifier.size(56.dp)) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .clip(RoundedCornerShape(16.dp))
-                        .background(accentColor.copy(alpha = 0.10f)),
+                        .background(accentColor.copy(alpha = 0.12f)),
                     contentAlignment = Alignment.Center
                 ) {
                     MinerDeviceIcon(
@@ -622,19 +948,15 @@ fun MinerListItem(miner: MinerInfo, btcPriceUsdt: Double?, networkHashrateEh: Do
                         tint = accentColor
                     )
                 }
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .size(13.dp)
-                        .clip(CircleShape)
-                        .background(
-                            when {
-                                !miner.isReachable -> Color(0xFFF44336)
-                                isLoading -> Color(0xFFFF9800)
-                                miner.isHealthy -> Color(0xFF4CAF50)
-                                else -> Color(0xFFF44336)
-                            }
-                        )
+                PulsingDot(
+                    color = when {
+                        !miner.isReachable -> Color(0xFFF44336)
+                        isLoading -> Color(0xFFFF9800)
+                        miner.isHealthy -> Color(0xFF4CAF50)
+                        else -> Color(0xFFF44336)
+                    },
+                    pulsing = miner.isReachable && !isLoading,
+                    modifier = Modifier.align(Alignment.BottomEnd)
                 )
             }
 
@@ -678,6 +1000,14 @@ fun MinerListItem(miner: MinerInfo, btcPriceUsdt: Double?, networkHashrateEh: Do
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                    // نوار شیمر جای‌نگهدار اطلاعات در حال خواندن
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.65f)
+                            .height(10.dp)
+                            .clip(RoundedCornerShape(5.dp))
+                            .shimmer()
+                    )
                 } else {
                     Text(
                         miner.minerType ?: "WhatsMiner",
@@ -750,8 +1080,9 @@ fun MinerListItem(miner: MinerInfo, btcPriceUsdt: Double?, networkHashrateEh: Do
 fun MetricChip(icon: ImageVector, text: String, tint: Color) {
     Row(
         modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(tint.copy(alpha = 0.10f))
+            .clip(RoundedCornerShape(9.dp))
+            .background(tint.copy(alpha = 0.13f))
+            .border(1.dp, tint.copy(alpha = 0.22f), RoundedCornerShape(9.dp))
             .padding(horizontal = 7.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -792,7 +1123,8 @@ fun HealthBadge(miner: MinerInfo, compact: Boolean = false) {
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(50))
-            .background(color.copy(alpha = 0.12f))
+            .background(color.copy(alpha = 0.14f))
+            .border(1.dp, color.copy(alpha = 0.30f), RoundedCornerShape(50))
             .padding(horizontal = 8.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -814,6 +1146,8 @@ fun HealthBadge(miner: MinerInfo, compact: Boolean = false) {
 
 // ==================================================================================
 // صفحه جزئیات دستگاه
+// بازطراحی: هدر هیروی گرادیانی، کارت‌های شیشه‌ای، تیترهای نوار رنگی،
+// نوار پیشرفت هش‌برد و فن، تایل راندمان (J/TH) و نمایش آدرس استخر
 // ==================================================================================
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -889,10 +1223,12 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
     }
 
     Scaffold(
+        containerColor = Color.Transparent,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
-                title = { Text(miner?.poolWorkerName ?: miner?.minerType ?: "جزئیات دستگاه") },
+                title = { Text(miner?.poolWorkerName ?: miner?.minerType ?: "جزئیات دستگاه", fontWeight = FontWeight.Bold) },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "بازگشت")
@@ -920,32 +1256,67 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                 .padding(padding)
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(14.dp)
+                .padding(16.dp)
         ) {
-            // ===== هدر: آیکون دستگاه + نام Worker/مدل =====
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                MinerDeviceIcon(modifier = Modifier.size(72.dp))
-                Spacer(modifier = Modifier.width(12.dp))
-                Column {
-                    Text(
-                        miner.poolWorkerName ?: "Worker: —",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+            // ===== هدر هیرو: آیکون دستگاه + نام Worker/مدل + نشان سلامت =====
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .shadow(14.dp, RoundedCornerShape(24.dp))
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(
+                        Brush.linearGradient(
+                            listOf(Color(0xFF151E2C), Color(0xFF1A2340), Color(0xFF231B33)),
+                            start = Offset.Zero,
+                            end = Offset.Infinite
+                        )
                     )
-                    Text(
-                        miner.minerType ?: "WhatsMiner",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    HealthBadge(miner = miner)
+                    .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(24.dp))
+            ) {
+                Icon(
+                    Icons.Filled.CurrencyBitcoin,
+                    contentDescription = null,
+                    tint = Color(0xFFFFB350).copy(alpha = 0.05f),
+                    modifier = Modifier.align(Alignment.BottomEnd).size(96.dp)
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.08f))
+                            .border(1.dp, Color.White.copy(alpha = 0.12f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        MinerDeviceIcon(modifier = Modifier.size(40.dp), tint = Color(0xFFFFB350))
+                    }
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column {
+                        Text(
+                            miner.poolWorkerName ?: "Worker: —",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = Color(0xFFF4F7FC),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            miner.minerType ?: "WhatsMiner",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFA9B4C6)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        HealthBadge(miner = miner)
+                    }
                 }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // ===== کارت شبکه: IP و MAC =====
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))) {
+            // ===== کارت شبکه: IP و MAC و استخر =====
+            GlassCard {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -979,23 +1350,40 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("MAC: ${miner.macAddress ?: "—"}", style = MaterialTheme.typography.bodyMedium)
                     }
+                    // آدرس استخر متصل (اگر دستگاه گزارش کرده باشد)
+                    miner.poolUrl?.let { poolUrl ->
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.Link, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.secondary)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                "استخر: $poolUrl",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
             // ===== اطلاعات دستگاه: فریمور / کنترل‌برد / پاور / مدل =====
-            Text("اطلاعات دستگاه", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-            Spacer(modifier = Modifier.height(6.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                DetailField(label = "فریمور", value = miner.firmwareVersion?.take(14) ?: "—", modifier = Modifier.weight(1f))
-                DetailField(label = "کنترل‌برد", value = miner.controlBoard ?: "—", modifier = Modifier.weight(1f))
-                DetailField(label = "پاور", value = miner.powerSupplyModel ?: "—", modifier = Modifier.weight(1f))
-                DetailField(label = "مدل", value = miner.minerType ?: "—", modifier = Modifier.weight(1f))
+            SectionHeader("اطلاعات دستگاه")
+            GlassCard(shape = RoundedCornerShape(16.dp), container = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp, horizontal = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    DetailField(label = "فریمور", value = miner.firmwareVersion?.take(14) ?: "—", modifier = Modifier.weight(1f))
+                    DetailField(label = "کنترل‌برد", value = miner.controlBoard ?: "—", modifier = Modifier.weight(1f))
+                    DetailField(label = "پاور", value = miner.powerSupplyModel ?: "—", modifier = Modifier.weight(1f))
+                    DetailField(label = "مدل", value = miner.minerType ?: "—", modifier = Modifier.weight(1f))
+                }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
-            Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
             Spacer(modifier = Modifier.height(14.dp))
 
             // ===== وضعیت: زمان فعالیت / تراهش / خطاها =====
@@ -1014,12 +1402,9 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
             }
 
             Spacer(modifier = Modifier.height(14.dp))
-            Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-            Spacer(modifier = Modifier.height(10.dp))
 
-            // ===== اکسپت‌ها / رجکت‌ها / توان =====
-            Text("📊 وضعیت استخراج", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-            Spacer(modifier = Modifier.height(6.dp))
+            // ===== اکسپت‌ها / رجکت‌ها / توان / راندمان =====
+            SectionHeader("وضعیت استخراج")
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                 StatChip(label = "اکسپت‌ها", value = miner.accepted?.let { formatNumber(it) } ?: "—", color = Color(0xFF4CAF50))
                 StatChip(
@@ -1027,16 +1412,20 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                     value = miner.rejected?.let { formatNumber(it) } ?: "—",
                     color = if ((miner.rejected ?: 0) > 0) MaterialTheme.colorScheme.error else Color.Unspecified
                 )
-                StatChip(label = "توان", value = miner.powerWatt?.let { "$it W" } ?: "—", color = Color(0xFFFF9800))
+                StatChip(label = "توان", value = miner.powerWatt?.let { "$it W" } ?: "—", color = Color(0xFFFF9800), iconVec = Icons.Filled.FlashOn)
+                // راندمان انرژی: وات به ازای هر TH/s (هرچه کمتر بهتر)
+                StatChip(
+                    label = "راندمان",
+                    value = miner.efficiencyJPerThs?.let { "%.1f J/TH".format(it) } ?: "—",
+                    color = Color(0xFF38BDF8),
+                    iconVec = Icons.Filled.Bolt
+                )
             }
 
             Spacer(modifier = Modifier.height(14.dp))
-            Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-            Spacer(modifier = Modifier.height(10.dp))
 
             // ===== دما و فن =====
-            Text("🌡️ دما و فن", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-            Spacer(modifier = Modifier.height(6.dp))
+            SectionHeader("دما و فن")
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                 StatChip(
                     label = "دمای میانگین",
@@ -1046,26 +1435,27 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                 StatChip(
                     label = "فن جلو (ورودی)",
                     value = miner.fanSpeedIn?.let { "$it RPM" } ?: "—",
-                    icon = R.drawable.ic_fan_speed
+                    iconVec = Icons.Filled.Air,
+                    color = Color(0xFF38BDF8)
                 )
                 StatChip(
                     label = "فن عقب (خروجی)",
                     value = miner.fanSpeedOut?.let { "$it RPM" } ?: "—",
-                    icon = R.drawable.ic_fan_speed
+                    iconVec = Icons.Filled.Air,
+                    color = Color(0xFFB69DFF)
                 )
             }
 
             Spacer(modifier = Modifier.height(14.dp))
-            Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-            Spacer(modifier = Modifier.height(10.dp))
 
             // ===== عملیات دستگاه: ریبوت / تغییر پول =====
-            Text("⚙️ عملیات دستگاه", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-            Spacer(modifier = Modifier.height(6.dp))
+            SectionHeader("عملیات دستگاه")
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
                     onClick = { showRebootConfirm = true },
                     enabled = !isBusy,
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f)),
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Filled.RestartAlt, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -1075,6 +1465,8 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                 OutlinedButton(
                     onClick = { showPoolPicker = true },
                     enabled = !isBusy,
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)),
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Filled.SwapHoriz, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -1084,7 +1476,11 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
             }
             if (isBusy) {
                 Spacer(modifier = Modifier.height(6.dp))
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
+                )
             }
             Text(
                 "رمز دستگاه پیش‌فرض «admin» در نظر گرفته می‌شود؛ اگر تغییر کرده باشد به‌صورت خودکار برای وارد کردن رمز صحیح از شما سؤال می‌شود.",
@@ -1095,11 +1491,9 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
 
             if (miner.hashboards.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(14.dp))
-                Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                Spacer(modifier = Modifier.height(10.dp))
-                Text("🖥️ هش‌بردها", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                Spacer(modifier = Modifier.height(6.dp))
-                miner.hashboards.forEach { HashboardRow(it) }
+                SectionHeader("هش‌بردها")
+                val maxBoardGhs = miner.hashboards.mapNotNull { it.hashrateGhs }.maxOrNull()
+                miner.hashboards.forEach { HashboardRow(it, maxBoardGhs) }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
@@ -1325,7 +1719,14 @@ private data class PendingPoolSwitch(val profile: PoolProfile, val workerName: S
 
 @Composable
 fun DetailField(label: String, value: String, modifier: Modifier = Modifier) {
-    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        modifier = modifier
+            .padding(horizontal = 3.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+            .padding(vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(modifier = Modifier.height(2.dp))
         Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 1)
@@ -1363,7 +1764,9 @@ fun ErrorsSection(miner: MinerInfo, onRetryCheck: (() -> Unit)? = null) {
     } else if (miner.errorCheckFailed) {
         // این حالت با «سالم» فرق دارد: یعنی نتوانستیم از دستگاه کد خطا بگیریم، نه اینکه واقعا خطایی نیست
         Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFFF9800).copy(alpha = 0.10f))
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFFF9800).copy(alpha = 0.10f)),
+            border = BorderStroke(1.dp, Color(0xFFFF9800).copy(alpha = 0.30f))
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(14.dp),
@@ -1384,7 +1787,9 @@ fun ErrorsSection(miner: MinerInfo, onRetryCheck: (() -> Unit)? = null) {
         }
     } else {
         Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF4CAF50).copy(alpha = 0.10f))
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF4CAF50).copy(alpha = 0.10f)),
+            border = BorderStroke(1.dp, Color(0xFF4CAF50).copy(alpha = 0.30f))
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(14.dp),
@@ -1403,7 +1808,11 @@ fun ErrorsSection(miner: MinerInfo, onRetryCheck: (() -> Unit)? = null) {
 
 @Composable
 fun ErrorDetailCard(detail: WhatsminerErrorDetail) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFF44336).copy(alpha = 0.07f))) {
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF44336).copy(alpha = 0.07f)),
+        border = BorderStroke(1.dp, Color(0xFFF44336).copy(alpha = 0.25f))
+    ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.Cancel, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
@@ -1452,9 +1861,10 @@ fun IncomeSection(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(18.dp))
             .background(Color(0xFFF7931A).copy(alpha = 0.08f))
-            .padding(10.dp)
+            .border(1.dp, Color(0xFFF7931A).copy(alpha = 0.25f), RoundedCornerShape(18.dp))
+            .padding(12.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
@@ -1588,7 +1998,7 @@ fun CalcDetailRow(label: String, value: String) {
 }
 
 @Composable
-fun HashboardRow(board: HashboardInfo) {
+fun HashboardRow(board: HashboardInfo, maxGhs: Double? = null) {
     // تصاویر هش‌برد که کاربر ارسال کرد فقط برای شماره‌های ۱ تا ۳ برچسب دارند؛ اگر دستگاهی بیشتر از
     // ۳ هش‌برد داشت (مدل‌های بزرگ‌تر)، تصاویر به‌صورت چرخشی دوباره استفاده می‌شوند
     val displayNumber = (board.id % 3) + 1
@@ -1597,42 +2007,116 @@ fun HashboardRow(board: HashboardInfo) {
         2 -> R.drawable.hashboard_2
         else -> R.drawable.hashboard_3
     }
+    // نسبت هشریت این برد به پرکارترین برد، برای نوار پیشرفت
+    val fraction = if (maxGhs != null && maxGhs > 0.0 && board.hashrateGhs != null) {
+        ((board.hashrateGhs!! / maxGhs).coerceIn(0.0, 1.0)).toFloat()
+    } else 0f
+
     Card(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Image(
-                    painter = painterResource(id = imageRes),
-                    contentDescription = null,
-                    modifier = Modifier.size(36.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("برد $displayNumber", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Image(
+                        painter = painterResource(id = imageRes),
+                        contentDescription = null,
+                        modifier = Modifier.size(34.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("برد $displayNumber", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                }
+                board.status?.let {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        PulsingDot(
+                            color = if (it.lowercase().contains("alive") || it == "1") Color(0xFF4CAF50) else Color(0xFFF44336),
+                            pulsing = it.lowercase().contains("alive") || it == "1",
+                            dotSize = 9.dp
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (it.lowercase().contains("alive") || it == "1") Color(0xFF4CAF50) else Color(0xFFF44336)
+                        )
+                    }
+                }
             }
-            Text(board.hashrateGhs?.let { "%.1f GH/s".format(it) } ?: "—", style = MaterialTheme.typography.bodySmall, color = Color(0xFF2196F3))
-            Text(board.temperaturePcb?.let { "%.0f°C".format(it) } ?: "—", style = MaterialTheme.typography.bodySmall, color = tempColor(board.temperaturePcb))
-            Text(board.effectiveChips?.let { "$it چیپ" } ?: "—", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            board.status?.let {
-                Text(it, style = MaterialTheme.typography.labelSmall, color = if (it.lowercase().contains("alive") || it == "1") Color(0xFF4CAF50) else Color(0xFFF44336))
+            Spacer(modifier = Modifier.height(8.dp))
+            // نوار پیشرفت هشریت برد
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.secondary)
+                            )
+                        )
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(board.hashrateGhs?.let { "%.1f GH/s".format(it) } ?: "—", style = MaterialTheme.typography.bodySmall, color = Color(0xFF2196F3), fontWeight = FontWeight.SemiBold)
+                Text(board.temperaturePcb?.let { "%.0f°C".format(it) } ?: "—", style = MaterialTheme.typography.bodySmall, color = tempColor(board.temperaturePcb))
+                Text(board.effectiveChips?.let { "$it چیپ" } ?: "—", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
 }
 
+/**
+ * تایل آماری شیشه‌ای (اکسپت/رجکت/توان/دما/فن/...)
+ */
 @Composable
-fun StatChip(label: String, value: String, color: Color = Color.Unspecified, icon: Int? = null) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+fun StatChip(
+    label: String,
+    value: String,
+    color: Color = Color.Unspecified,
+    icon: Int? = null,
+    iconVec: ImageVector? = null
+) {
+    val valueColor = if (color != Color.Unspecified) color else MaterialTheme.colorScheme.onSurface
+    val iconTint = if (color != Color.Unspecified) color else MaterialTheme.colorScheme.onSurfaceVariant
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.65f))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
         if (icon != null) {
             Icon(
                 painter = painterResource(id = icon),
                 contentDescription = null,
-                tint = if (color != Color.Unspecified) color else MaterialTheme.colorScheme.onSurfaceVariant,
+                tint = iconTint,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+        } else if (iconVec != null) {
+            Icon(
+                iconVec,
+                contentDescription = null,
+                tint = iconTint,
                 modifier = Modifier.size(16.dp)
             )
             Spacer(modifier = Modifier.height(2.dp))
@@ -1640,8 +2124,8 @@ fun StatChip(label: String, value: String, color: Color = Color.Unspecified, ico
         Text(
             value,
             style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = if (color != Color.Unspecified) color else MaterialTheme.colorScheme.onSurface
+            fontWeight = FontWeight.Bold,
+            color = valueColor
         )
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
@@ -1696,6 +2180,7 @@ fun DiagnosticsSection(minerIp: String) {
     val scope = rememberCoroutineScope()
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
     ) {
         Column(modifier = Modifier.padding(12.dp)) {

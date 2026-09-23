@@ -54,6 +54,15 @@ data class MinerInfo(
     val ghsAverageThs: Double?
         get() = ghsAverage?.div(1000.0)
 
+    // راندمان انرژی: ژول مصرفی به ازای هر تراهش (توان ÷ هشریت). هرچه کمتر، بهتر.
+    val efficiencyJPerThs: Double?
+        get() {
+            val ths = ghsAverageThs ?: totalHashrateThs
+            val watt = powerWatt
+            if (ths == null || watt == null || ths <= 0.0) return null
+            return watt / ths
+        }
+
     fun uptimeFormatted(): String {
         val secs = elapsedSeconds ?: return "—"
         val days = secs / 86400
