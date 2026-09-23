@@ -1,10 +1,12 @@
 package com.miner.whatsminermonitor
 
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
 import androidx.compose.animation.expandVertically
@@ -48,6 +50,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
@@ -59,6 +62,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -76,6 +80,7 @@ import com.miner.whatsminermonitor.network.PrivilegedResult
 import com.miner.whatsminermonitor.network.WhatsminerClient
 import com.miner.whatsminermonitor.ui.CredentialsStore
 import com.miner.whatsminermonitor.ui.MinerViewModel
+import com.miner.whatsminermonitor.ui.ScanLock
 import com.miner.whatsminermonitor.ui.ThemePrefs
 import com.miner.whatsminermonitor.ui.theme.WhatsminerMonitorTheme
 import kotlinx.coroutines.delay
@@ -92,13 +97,22 @@ import kotlin.math.sin
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent {
             val context = LocalContext.current
+            val view = LocalView.current
             var themeMode by remember { mutableStateOf(ThemePrefs.read(context)) }
             val darkTheme = when (themeMode) {
                 1 -> false
                 2 -> true
                 else -> isSystemInDarkTheme()
+            }
+            // رنگ آیکون‌های نوار وضعیت با تم انتخابی برنامه هماهنگ می‌شود
+            if (!view.isInEditMode) {
+                SideEffect {
+                    val window = (view.context as Activity).window
+                    WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
+                }
             }
             WhatsminerMonitorTheme(darkTheme = darkTheme) {
                 Box(
@@ -106,8 +120,8 @@ class MainActivity : ComponentActivity() {
                         .fillMaxSize()
                         .background(MaterialTheme.colorScheme.background)
                 ) {
-                    // پس‌زمینهٔ شفق متحرک پشت همهٔ صفحه‌ها
-                    AnimatedAuroraBackground()
+                    // پس‌زمینهٔ شفق متحرک پشت همهٔ صفحه‌ها — با همان تمِ انتخابی کاربر (نه تم سیستم)
+                    AnimatedAuroraBackground(dark = darkTheme)
                     Surface(
                         modifier = Modifier.fillMaxSize(),
                         color = Color.Transparent,
@@ -173,8 +187,7 @@ private fun fract(v: Float): Float = v - floor(v)
 
 /** پس‌زمینهٔ متحرک: هاله‌های نورانی رنگی + ذرات شناور که بسیار آرام حرکت می‌کنند */
 @Composable
-fun AnimatedAuroraBackground(modifier: Modifier = Modifier) {
-    val dark = isSystemInDarkTheme()
+fun AnimatedAuroraBackground(modifier: Modifier = Modifier, dark: Boolean = isSystemInDarkTheme()) {
     val baseTop = if (dark) Color(0xFF0A0F16) else Color(0xFFF4F7FB)
     val baseBottom = if (dark) Color(0xFF0D1420) else Color(0xFFECF1F8)
     val orbAlpha = if (dark) 0.14f else 0.20f
@@ -392,6 +405,12 @@ fun MinerListScreen(
 
     var showCalculator by remember { mutableStateOf(false) }
 
+    // قفل اسکن: تا وقتی رمز درست وارد نشده باشد، دکمهٔ اسکن کار نمی‌کند؛
+    // رمز یک‌بار وارد و ذخیره می‌شود و تا حذف/نصب مجدد دوباره پرسیده نمی‌شود
+    val lockContext = LocalContext.current
+    val scanUnlocked = remember { mutableStateOf(ScanLock.isUnlocked(lockContext)) }
+    var showScanLock by remember { mutableStateOf(false) }
+
     Scaffold(
         containerColor = Color.Transparent,
         topBar = {
@@ -459,7 +478,13 @@ fun MinerListScreen(
                     .clip(RoundedCornerShape(18.dp))
                     .background(gradBrush)
                     .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(18.dp))
-                    .clickable { if (isScanning) viewModel.stopScan() else viewModel.startScan() }
+                    .clickable {
+                        when {
+                            !scanUnlocked.value -> showScanLock = true
+                            isScanning -> viewModel.stopScan()
+                            else -> viewModel.startScan()
+                        }
+                    }
                     .padding(horizontal = 22.dp, vertical = 14.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -527,6 +552,59 @@ fun MinerListScreen(
             liveUsdToToman = viewModel.usdToToman.collectAsState().value,
             liveNetworkHashrateEh = networkEh,
             onDismiss = { showCalculator = false }
+        )
+    }
+
+    // ===== دیالوگ قفل اسکن: رمز فقط یک‌بار پرسیده می‌شود =====
+    if (showScanLock) {
+        var pwInput by remember { mutableStateOf("") }
+        var pwError by remember { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { showScanLock = false },
+            icon = { Icon(Icons.Filled.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+            title = { Text("ورود رمز") },
+            text = {
+                Column {
+                    Text(
+                        "برای استفاده از اسکنر، رمز برنامه را وارد کنید:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = pwInput,
+                        onValueChange = { pwInput = it; pwError = false },
+                        label = { Text("رمز") },
+                        singleLine = true,
+                        isError = pwError,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        supportingText = if (pwError) {
+                            { Text("رمز اشتباه است", color = MaterialTheme.colorScheme.error) }
+                        } else null,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (pwInput == ScanLock.PASSWORD) {
+                            ScanLock.unlock(lockContext)
+                            scanUnlocked.value = true
+                            showScanLock = false
+                            // به‌محض باز شدن قفل، اسکن شروع می‌شود
+                            viewModel.startScan()
+                        } else {
+                            pwError = true
+                        }
+                    },
+                    enabled = pwInput.isNotBlank()
+                ) { Text("تایید") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showScanLock = false }) { Text("انصراف") }
+            }
         )
     }
 }
@@ -1317,14 +1395,13 @@ fun MinerDetailScreen(
     var showPasswordDialog by remember { mutableStateOf(false) }
     var pendingAction by remember { mutableStateOf<PendingPrivilegedAction?>(null) }
     var isBusy by remember { mutableStateOf(false) }
-    // آپشن بروزرسانی خودکار: تا وقتی این صفحه باز است هر ۱۰ ثانیه یک‌بار داده تازه می‌شود
-    var autoRefresh by remember { mutableStateOf(false) }
 
-    LaunchedEffect(autoRefresh, ip) {
-        if (autoRefresh && ip != null) {
+    // بروزرسانی زندهٔ اجباری: تا وقتی این صفحه باز است، اطلاعات هر یک ثانیه مستقیم از دستگاه تازه می‌شود
+    LaunchedEffect(ip) {
+        if (ip != null) {
             while (true) {
                 viewModel.refreshMiner(ip)
-                delay(10000)
+                delay(1000)
             }
         }
     }
@@ -1748,33 +1825,6 @@ fun MinerDetailScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 6.dp)
                     )
-                    // آپشن: بروزرسانی خودکار داده‌ها تا وقتی این صفحه باز است
-                    Spacer(modifier = Modifier.height(10.dp))
-                    GlassCard(shape = RoundedCornerShape(16.dp), container = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                Icon(Icons.Filled.Autorenew, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Column {
-                                    Text("بروزرسانی خودکار", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                                    Text(
-                                        "هر ۱۰ ثانیه یک‌بار، تا وقتی این صفحه باز است",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                            Switch(
-                                checked = autoRefresh,
-                                onCheckedChange = { autoRefresh = it },
-                                colors = SwitchDefaults.colors(checkedTrackColor = MaterialTheme.colorScheme.primary)
-                            )
-                        }
-                    }
                 }
             }
 
