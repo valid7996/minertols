@@ -23,7 +23,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -44,6 +44,7 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -75,13 +76,16 @@ import com.miner.whatsminermonitor.network.PrivilegedResult
 import com.miner.whatsminermonitor.network.WhatsminerClient
 import com.miner.whatsminermonitor.ui.CredentialsStore
 import com.miner.whatsminermonitor.ui.MinerViewModel
+import com.miner.whatsminermonitor.ui.ThemePrefs
 import com.miner.whatsminermonitor.ui.theme.WhatsminerMonitorTheme
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
 import java.text.NumberFormat
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.roundToLong
 import kotlin.math.sin
 
@@ -89,7 +93,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            WhatsminerMonitorTheme {
+            val context = LocalContext.current
+            var themeMode by remember { mutableStateOf(ThemePrefs.read(context)) }
+            val darkTheme = when (themeMode) {
+                1 -> false
+                2 -> true
+                else -> isSystemInDarkTheme()
+            }
+            WhatsminerMonitorTheme(darkTheme = darkTheme) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -99,9 +110,23 @@ class MainActivity : ComponentActivity() {
                     AnimatedAuroraBackground()
                     Surface(
                         modifier = Modifier.fillMaxSize(),
-                        color = Color.Transparent
+                        color = Color.Transparent,
+                        // مهم: بدون این، متن‌های بدون رنگ صریح روی پس‌زمینهٔ شفاف به
+                        // LocalContentColor پیش‌فرض (مشکی) برمی‌گردند و در حالت شب دیده نمی‌شوند
+                        contentColor = MaterialTheme.colorScheme.onBackground
                     ) {
-                        AppNavHost()
+                        AppNavHost(
+                            themeMode = themeMode,
+                            onCycleTheme = {
+                                val next = when (themeMode) {
+                                    0 -> 2   // سیستم -> تاریک
+                                    2 -> 1   // تاریک -> روشن
+                                    else -> 0 // روشن -> سیستم
+                                }
+                                themeMode = next
+                                ThemePrefs.write(context, next)
+                            }
+                        )
                     }
                 }
             }
@@ -110,7 +135,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun AppNavHost(viewModel: MinerViewModel = viewModel()) {
+fun AppNavHost(
+    viewModel: MinerViewModel = viewModel(),
+    themeMode: Int = 0,
+    onCycleTheme: () -> Unit = {}
+) {
     val navController: NavHostController = rememberNavController()
     NavHost(navController = navController, startDestination = "list") {
         composable("list") {
@@ -118,7 +147,9 @@ fun AppNavHost(viewModel: MinerViewModel = viewModel()) {
                 viewModel = viewModel,
                 onOpenDetail = { ip ->
                     navController.navigate("detail/${URLEncoder.encode(ip, "UTF-8")}")
-                }
+                },
+                themeMode = themeMode,
+                onCycleTheme = onCycleTheme
             )
         }
         composable("detail/{ip}") { backStackEntry ->
@@ -126,7 +157,9 @@ fun AppNavHost(viewModel: MinerViewModel = viewModel()) {
             MinerDetailScreen(
                 ip = ip,
                 viewModel = viewModel,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                themeMode = themeMode,
+                onCycleTheme = onCycleTheme
             )
         }
     }
@@ -136,7 +169,9 @@ fun AppNavHost(viewModel: MinerViewModel = viewModel()) {
 // کیت بصری مشترک
 // ==================================================================================
 
-/** پس‌زمینهٔ متحرک: هاله‌های نورانی رنگی که بسیار آرام روی زمینه حرکت می‌کنند */
+private fun fract(v: Float): Float = v - floor(v)
+
+/** پس‌زمینهٔ متحرک: هاله‌های نورانی رنگی + ذرات شناور که بسیار آرام حرکت می‌کنند */
 @Composable
 fun AnimatedAuroraBackground(modifier: Modifier = Modifier) {
     val dark = isSystemInDarkTheme()
@@ -159,6 +194,11 @@ fun AnimatedAuroraBackground(modifier: Modifier = Modifier) {
     val a3 by transition.animateFloat(
         0f, (2f * PI).toFloat(),
         infiniteRepeatable(tween(41000, easing = LinearEasing)), label = "a3"
+    )
+    // پیشرفت کلی ذرات (هر ذره با سرعت/فاز خودش روی این سوار می‌شود)
+    val pt by transition.animateFloat(
+        0f, 1f,
+        infiniteRepeatable(tween(18000, easing = LinearEasing)), label = "pt"
     )
 
     Canvas(modifier.fillMaxSize()) {
@@ -184,6 +224,24 @@ fun AnimatedAuroraBackground(modifier: Modifier = Modifier) {
             radius = size.width * 0.60f,
             center = c3
         )
+        // ذرات نورانی شناور: از پایین به بالا با نوسان جانبی و محوشدن تدریجی
+        val particleColors = listOf(cAmber, cCyan, cViolet)
+        for (i in 0 until 14) {
+            val seed = i * 0.618034f
+            val speed = 0.6f + fract(seed * 7.31f) * 0.9f
+            val prog = fract(pt * speed + seed)
+            val xBase = fract(sin(seed * 127.1f) * 43758.5453f)
+            val sway = sin((pt + seed * 10f) * (2f * PI).toFloat()) * size.width * 0.015f
+            val px = size.width * xBase + sway
+            val py = size.height * (1.06f - 1.18f * prog)
+            val pr = (1.5f + fract(seed * 13.7f) * 2.5f).dp.toPx()
+            val pAlpha = sin((prog * PI).toFloat()) * 0.35f
+            drawCircle(
+                color = particleColors[i % 3].copy(alpha = pAlpha),
+                radius = pr,
+                center = Offset(px, py)
+            )
+        }
     }
 }
 
@@ -252,6 +310,24 @@ fun Modifier.shimmer(): Modifier {
     }
 }
 
+/** انیمیشن ورود نرم (پرش به بالا + محو شدن) برای کارت‌ها و بخش‌ها */
+@Composable
+fun EnterAnimation(delayMs: Int = 0, content: @Composable () -> Unit) {
+    var shown by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (delayMs > 0) delay(delayMs.toLong())
+        shown = true
+    }
+    val alphaAnim by animateFloatAsState(if (shown) 1f else 0f, tween(380, easing = FastOutSlowInEasing), label = "enterA")
+    val tyAnim by animateFloatAsState(if (shown) 0f else 44f, tween(380, easing = FastOutSlowInEasing), label = "enterY")
+    Box(
+        Modifier.graphicsLayer {
+            alpha = alphaAnim
+            translationY = tyAnim
+        }
+    ) { content() }
+}
+
 /** تیتر بخش با نوار رنگی عمودی */
 @Composable
 fun SectionHeader(text: String, tint: Color = MaterialTheme.colorScheme.primary) {
@@ -267,13 +343,39 @@ fun SectionHeader(text: String, tint: Color = MaterialTheme.colorScheme.primary)
     }
 }
 
+/** دکمهٔ گرد شیشه‌ای برای آیکون‌های نوار بالا (محاسبه‌گر/تم/...) */
+@Composable
+fun GlassIconButton(
+    onClick: () -> Unit,
+    contentDescription: String,
+    icon: ImageVector,
+    tint: Color = MaterialTheme.colorScheme.primary
+) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), CircleShape)
+    ) {
+        IconButton(onClick = onClick) {
+            Icon(icon, contentDescription = contentDescription, tint = tint)
+        }
+    }
+}
+
 // ==================================================================================
 // صفحه اصلی: خلاصه (درآمد روزانه / گیج هشریت کل / تعداد ماینرها) + لیست دستگاه‌ها
 // بازطراحی: هدر گرادیانی، پس‌زمینهٔ شفق متحرک، کارت‌های شیشه‌ای، FAB گرادیانی
 // ==================================================================================
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
+fun MinerListScreen(
+    viewModel: MinerViewModel,
+    onOpenDetail: (String) -> Unit,
+    themeMode: Int = 0,
+    onCycleTheme: () -> Unit = {}
+) {
     val miners by viewModel.miners.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
     val status by viewModel.statusMessage.collectAsState()
@@ -319,26 +421,32 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                // دکمهٔ محاسبه‌گر در قاب شیشه‌ای
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
-                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), CircleShape)
-                ) {
-                    IconButton(onClick = { showCalculator = true }) {
-                        Icon(
-                            Icons.Filled.Calculate,
-                            contentDescription = "محاسبه‌گر سود استخراج",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // تغییر تم: سیستم / تاریک / روشن
+                    GlassIconButton(
+                        onClick = onCycleTheme,
+                        contentDescription = "تغییر تم برنامه",
+                        icon = when (themeMode) {
+                            1 -> Icons.Filled.LightMode
+                            2 -> Icons.Filled.DarkMode
+                            else -> Icons.Filled.BrightnessAuto
+                        },
+                        tint = MaterialTheme.colorScheme.secondary
+                    )
+                    GlassIconButton(
+                        onClick = { showCalculator = true },
+                        contentDescription = "محاسبه‌گر سود استخراج",
+                        icon = Icons.Filled.Calculate,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
                 }
             }
         },
         floatingActionButton = {
-            // FAB گرادیانی با درخشش
+            // FAB گرادیانی با درخشش؛ در حالت اسکن مثل قلب نفس می‌کشد
+            val fabT = rememberInfiniteTransition(label = "fab")
+            val fabP by fabT.animateFloat(0f, (2f * PI).toFloat(), infiniteRepeatable(tween(1300, easing = LinearEasing)), label = "fabp")
+            val fabScale = if (isScanning) 1f + 0.035f * sin(fabP) else 1f
             val gradBrush = if (isScanning) {
                 Brush.linearGradient(listOf(Color(0xFFFF7043), Color(0xFFE53935)))
             } else {
@@ -347,6 +455,7 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
             Box(
                 modifier = Modifier
                     .shadow(16.dp, RoundedCornerShape(18.dp))
+                    .scale(fabScale)
                     .clip(RoundedCornerShape(18.dp))
                     .background(gradBrush)
                     .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(18.dp))
@@ -400,8 +509,11 @@ fun MinerListScreen(viewModel: MinerViewModel, onOpenDetail: (String) -> Unit) {
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    items(miners, key = { it.ip }) { miner ->
-                        MinerListItem(miner = miner, btcPriceUsdt = btcPriceUsdt, networkHashrateEh = networkEh, onOpen = { onOpenDetail(miner.ip) })
+                    itemsIndexed(miners, key = { _, m -> m.ip }) { idx, miner ->
+                        // ورود آبشاری کارت‌ها
+                        EnterAnimation(delayMs = (idx % 8) * 45) {
+                            MinerListItem(miner = miner, btcPriceUsdt = btcPriceUsdt, networkHashrateEh = networkEh, onOpen = { onOpenDetail(miner.ip) })
+                        }
                     }
                     item { Spacer(modifier = Modifier.height(84.dp)) }
                 }
@@ -569,9 +681,10 @@ fun ProfitCalculatorDialog(
 
 @Composable
 fun EmptyState() {
-    // حلقه‌های رادار که مثل جستجوی شبکه بیرون می‌پرند
+    // حلقه‌های رادار که مثل جستجوی شبکه بیرون می‌پرند + شناوری ملایم آیکون
     val t = rememberInfiniteTransition(label = "radar")
     val pulse by t.animateFloat(0f, 1f, infiniteRepeatable(tween(2400, easing = LinearEasing)), label = "pulse")
+    val bob by t.animateFloat(0f, (2f * PI).toFloat(), infiniteRepeatable(tween(2200, easing = LinearEasing)), label = "bob")
     val ringColor = MaterialTheme.colorScheme.primary
 
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -593,6 +706,7 @@ fun EmptyState() {
         ) {
             Box(
                 modifier = Modifier
+                    .offset(y = (sin(bob) * 6).dp)
                     .size(96.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.10f))
@@ -637,6 +751,10 @@ fun SummaryHeader(
     minerCount: Int,
     modifier: Modifier = Modifier
 ) {
+    // چرخش بسیار آرام واترمارک بیت‌کوین
+    val wmT = rememberInfiniteTransition(label = "wm")
+    val wmAngle by wmT.animateFloat(0f, 360f, infiniteRepeatable(tween(60000, easing = LinearEasing)), label = "wmAngle")
+
     Box(
         modifier
             .fillMaxWidth()
@@ -651,12 +769,12 @@ fun SummaryHeader(
             )
             .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(26.dp))
     ) {
-        // واترمارک بیت‌کوین گوشهٔ کارت
+        // واترمارک بیت‌کوین گوشهٔ کارت (در حال چرخش آرام)
         Icon(
             Icons.Filled.CurrencyBitcoin,
             contentDescription = null,
             tint = Color(0xFFFFB350).copy(alpha = 0.06f),
-            modifier = Modifier.align(Alignment.TopEnd).size(110.dp)
+            modifier = Modifier.align(Alignment.TopEnd).size(110.dp).rotate(wmAngle)
         )
         Row(
             modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp, horizontal = 10.dp),
@@ -738,6 +856,23 @@ fun HeroTile(
             color = Color(0xFFA9B4C6),
             textAlign = TextAlign.Center
         )
+    }
+}
+
+/** چیپ کوچک شیشه‌ای داخل هدر هیروی صفحهٔ جزئیات (هشریت/توان/دما) */
+@Composable
+fun HeroMiniStat(icon: ImageVector, value: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.White.copy(alpha = 0.06f))
+            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, tint = Color(0xFFFFB350), modifier = Modifier.size(13.dp))
+        Spacer(modifier = Modifier.width(5.dp))
+        Text(value, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = Color(0xFFE7EDF5), maxLines = 1)
     }
 }
 
@@ -1148,12 +1283,18 @@ fun HealthBadge(miner: MinerInfo, compact: Boolean = false) {
 
 // ==================================================================================
 // صفحه جزئیات دستگاه
-// بازطراحی: هدر هیروی گرادیانی، کارت‌های شیشه‌ای، تیترهای نوار رنگی،
-// نوار پیشرفت هش‌برد و فن، تایل راندمان (J/TH) و نمایش آدرس استخر
+// بازطراحی: هدر هیروی گرادیانی با ردیف آمار، کارت‌های شیشه‌ای، تیترهای نوار رنگی،
+// نوار پیشرفت هش‌برد، انیمیشن ورود آبشاری بخش‌ها + آپشن‌های بروزرسانی خودکار/اشتراک/کپی
 // ==================================================================================
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit) {
+fun MinerDetailScreen(
+    ip: String?,
+    viewModel: MinerViewModel,
+    onBack: () -> Unit,
+    themeMode: Int = 0,
+    onCycleTheme: () -> Unit = {}
+) {
     val miners by viewModel.miners.collectAsState()
     val btcPriceUsdt by viewModel.btcPriceUsdt.collectAsState()
     val btcPriceToman by viewModel.btcPriceToman.collectAsState()
@@ -1176,6 +1317,17 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
     var showPasswordDialog by remember { mutableStateOf(false) }
     var pendingAction by remember { mutableStateOf<PendingPrivilegedAction?>(null) }
     var isBusy by remember { mutableStateOf(false) }
+    // آپشن بروزرسانی خودکار: تا وقتی این صفحه باز است هر ۱۰ ثانیه یک‌بار داده تازه می‌شود
+    var autoRefresh by remember { mutableStateOf(false) }
+
+    LaunchedEffect(autoRefresh, ip) {
+        if (autoRefresh && ip != null) {
+            while (true) {
+                viewModel.refreshMiner(ip)
+                delay(10000)
+            }
+        }
+    }
 
     suspend fun runPrivileged(action: PendingPrivilegedAction, ipAddr: String) {
         isBusy = true
@@ -1237,7 +1389,43 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                     }
                 },
                 actions = {
+                    // تغییر تم: سیستم / تاریک / روشن
+                    IconButton(onClick = onCycleTheme) {
+                        Icon(
+                            when (themeMode) {
+                                1 -> Icons.Filled.LightMode
+                                2 -> Icons.Filled.DarkMode
+                                else -> Icons.Filled.BrightnessAuto
+                            },
+                            contentDescription = "تغییر تم برنامه"
+                        )
+                    }
                     if (miner != null) {
+                        // اشتراک‌گذاری گزارش متنی دستگاه
+                        IconButton(onClick = {
+                            val dailyBtc = miner.estimatedDailyBtc(networkHashrateEh ?: 994.68)
+                            val dailyUsdtStr = btcPriceUsdt?.let { "$${"%.2f".format(dailyBtc * it)}" } ?: "—"
+                            val shareText = buildString {
+                                appendLine("گزارش دستگاه ${miner.poolWorkerName ?: miner.minerType ?: miner.ip}")
+                                appendLine("IP: ${miner.ip}")
+                                appendLine("مدل: ${miner.minerType ?: "—"}")
+                                appendLine("هشریت: ${miner.ghsAverageThs?.let { "%.1f TH/s".format(it) } ?: "—"}")
+                                appendLine("توان: ${miner.powerWatt?.let { "$it W" } ?: "—"}")
+                                appendLine("راندمان: ${miner.efficiencyJPerThs?.let { "%.1f J/TH".format(it) } ?: "—"}")
+                                appendLine("دما: ${miner.averageTemperature?.let { "%.1f°C".format(it) } ?: "—"}")
+                                appendLine("فن‌ها: جلو ${miner.fanSpeedIn ?: "—"} | عقب ${miner.fanSpeedOut ?: "—"}")
+                                appendLine("زمان فعالیت: ${miner.uptimeFormatted()}")
+                                appendLine("سلامت: ${if (miner.isHealthy) "عالی" else "اخطار (${miner.errorCodes.size})"}")
+                                appendLine("درآمد روزانه: $dailyUsdtStr")
+                            }
+                            val send = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, shareText)
+                            }
+                            context.startActivity(Intent.createChooser(send, "اشتراک‌گذاری گزارش دستگاه"))
+                        }) {
+                            Icon(Icons.Filled.Share, contentDescription = "اشتراک‌گذاری گزارش")
+                        }
                         IconButton(onClick = { viewModel.refreshMiner(miner.ip) }) {
                             Icon(Icons.Filled.Refresh, contentDescription = "بروزرسانی")
                         }
@@ -1253,6 +1441,10 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
             return@Scaffold
         }
 
+        // چرخش بسیار آرام واترمارک بیت‌کوین هدر
+        val wmT = rememberInfiniteTransition(label = "wm")
+        val wmAngle by wmT.animateFloat(0f, 360f, infiniteRepeatable(tween(60000, easing = LinearEasing)), label = "wmAngle")
+
         Column(
             modifier = Modifier
                 .padding(padding)
@@ -1260,110 +1452,92 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
-            // ===== هدر هیرو: آیکون دستگاه + نام Worker/مدل + نشان سلامت =====
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .shadow(14.dp, RoundedCornerShape(24.dp))
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(
-                        Brush.linearGradient(
-                            listOf(Color(0xFF151E2C), Color(0xFF1A2340), Color(0xFF231B33)),
-                            start = Offset.Zero,
-                            end = Offset.Infinite
+            // ===== هدر هیرو: آیکون دستگاه + نام Worker/مدل + نشان سلامت + آمار فوری =====
+            EnterAnimation {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .shadow(14.dp, RoundedCornerShape(24.dp))
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(
+                            Brush.linearGradient(
+                                listOf(Color(0xFF151E2C), Color(0xFF1A2340), Color(0xFF231B33)),
+                                start = Offset.Zero,
+                                end = Offset.Infinite
+                            )
                         )
-                    )
-                    .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(24.dp))
-            ) {
-                Icon(
-                    Icons.Filled.CurrencyBitcoin,
-                    contentDescription = null,
-                    tint = Color(0xFFFFB350).copy(alpha = 0.05f),
-                    modifier = Modifier.align(Alignment.BottomEnd).size(96.dp)
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(24.dp))
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(64.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.08f))
-                            .border(1.dp, Color.White.copy(alpha = 0.12f), CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        MinerDeviceIcon(modifier = Modifier.size(40.dp), tint = Color(0xFFFFB350))
-                    }
-                    Spacer(modifier = Modifier.width(14.dp))
+                    Icon(
+                        Icons.Filled.CurrencyBitcoin,
+                        contentDescription = null,
+                        tint = Color(0xFFFFB350).copy(alpha = 0.05f),
+                        modifier = Modifier.align(Alignment.BottomEnd).size(96.dp).rotate(wmAngle)
+                    )
                     Column {
-                        Text(
-                            miner.poolWorkerName ?: "Worker: —",
-                            style = MaterialTheme.typography.titleLarge,
-                            color = Color(0xFFF4F7FC),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            miner.minerType ?: "WhatsMiner",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFA9B4C6)
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        HealthBadge(miner = miner)
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // ===== کارت شبکه: IP و MAC و استخر =====
-            GlassCard {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Dns, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("IP: ${miner.ip}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                        }
-                        Row {
-                            IconButton(onClick = { clipboard.setText(AnnotatedString(miner.ip)) }, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = "کپی IP", modifier = Modifier.size(16.dp))
-                            }
-                            Spacer(modifier = Modifier.width(2.dp))
-                            IconButton(
-                                onClick = {
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("http://${miner.ip}"))
-                                    context.startActivity(intent)
-                                },
-                                modifier = Modifier.size(28.dp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White.copy(alpha = 0.08f))
+                                    .border(1.dp, Color.White.copy(alpha = 0.12f), CircleShape),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Icon(Icons.Filled.OpenInNew, contentDescription = "باز کردن در مرورگر", modifier = Modifier.size(16.dp))
+                                MinerDeviceIcon(modifier = Modifier.size(40.dp), tint = Color(0xFFFFB350))
+                            }
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    miner.poolWorkerName ?: "Worker: —",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    color = Color(0xFFF4F7FC),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    miner.minerType ?: "WhatsMiner",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFFA9B4C6)
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                HealthBadge(miner = miner)
+                            }
+                            // کپی نام Worker
+                            IconButton(onClick = {
+                                clipboard.setText(AnnotatedString(miner.poolWorkerName ?: miner.ip))
+                            }, modifier = Modifier.size(34.dp)) {
+                                Icon(
+                                    Icons.Filled.ContentCopy,
+                                    contentDescription = "کپی نام Worker",
+                                    tint = Color(0xFFA9B4C6),
+                                    modifier = Modifier.size(16.dp)
+                                )
                             }
                         }
-                    }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.SettingsEthernet, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("MAC: ${miner.macAddress ?: "—"}", style = MaterialTheme.typography.bodyMedium)
-                    }
-                    // آدرس استخر متصل (اگر دستگاه گزارش کرده باشد)
-                    miner.poolUrl?.let { poolUrl ->
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Link, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.secondary)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                "استخر: $poolUrl",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                        Spacer(modifier = Modifier.height(12.dp))
+                        // ردیف آمار فوری داخل هدر
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            HeroMiniStat(
+                                icon = Icons.Filled.Speed,
+                                value = miner.ghsAverageThs?.let { "%.1f TH/s".format(it) } ?: "—",
+                                modifier = Modifier.weight(1f)
+                            )
+                            HeroMiniStat(
+                                icon = Icons.Filled.FlashOn,
+                                value = miner.powerWatt?.let { "$it W" } ?: "—",
+                                modifier = Modifier.weight(1f)
+                            )
+                            HeroMiniStat(
+                                icon = Icons.Filled.DeviceThermostat,
+                                value = miner.averageTemperature?.let { "%.1f°C".format(it) } ?: "—",
+                                modifier = Modifier.weight(1f)
                             )
                         }
                     }
@@ -1372,150 +1546,273 @@ fun MinerDetailScreen(ip: String?, viewModel: MinerViewModel, onBack: () -> Unit
 
             Spacer(modifier = Modifier.height(14.dp))
 
+            // ===== کارت شبکه: IP و MAC و استخر =====
+            EnterAnimation(delayMs = 60) {
+                GlassCard {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.Dns, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("IP: ${miner.ip}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                            }
+                            Row {
+                                IconButton(onClick = { clipboard.setText(AnnotatedString(miner.ip)) }, modifier = Modifier.size(28.dp)) {
+                                    Icon(Icons.Filled.ContentCopy, contentDescription = "کپی IP", modifier = Modifier.size(16.dp))
+                                }
+                                Spacer(modifier = Modifier.width(2.dp))
+                                IconButton(
+                                    onClick = {
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("http://${miner.ip}"))
+                                        context.startActivity(intent)
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Filled.OpenInNew, contentDescription = "باز کردن در مرورگر", modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.SettingsEthernet, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("MAC: ${miner.macAddress ?: "—"}", style = MaterialTheme.typography.bodyMedium)
+                            }
+                            miner.macAddress?.let { mac ->
+                                IconButton(onClick = { clipboard.setText(AnnotatedString(mac)) }, modifier = Modifier.size(28.dp)) {
+                                    Icon(Icons.Filled.ContentCopy, contentDescription = "کپی MAC", modifier = Modifier.size(15.dp))
+                                }
+                            }
+                        }
+                        // آدرس استخر متصل (اگر دستگاه گزارش کرده باشد)
+                        miner.poolUrl?.let { poolUrl ->
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.Link, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.secondary)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    "استخر: $poolUrl",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
             // ===== اطلاعات دستگاه: فریمور / کنترل‌برد / پاور / مدل =====
-            SectionHeader("اطلاعات دستگاه")
-            GlassCard(shape = RoundedCornerShape(16.dp), container = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp, horizontal = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    DetailField(label = "فریمور", value = miner.firmwareVersion?.take(14) ?: "—", modifier = Modifier.weight(1f))
-                    DetailField(label = "کنترل‌برد", value = miner.controlBoard ?: "—", modifier = Modifier.weight(1f))
-                    DetailField(label = "پاور", value = miner.powerSupplyModel ?: "—", modifier = Modifier.weight(1f))
-                    DetailField(label = "مدل", value = miner.minerType ?: "—", modifier = Modifier.weight(1f))
+            EnterAnimation(delayMs = 120) {
+                Column {
+                    SectionHeader("اطلاعات دستگاه")
+                    GlassCard(shape = RoundedCornerShape(16.dp), container = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp, horizontal = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            DetailField(label = "فریمور", value = miner.firmwareVersion?.take(14) ?: "—", modifier = Modifier.weight(1f))
+                            DetailField(label = "کنترل‌برد", value = miner.controlBoard ?: "—", modifier = Modifier.weight(1f))
+                            DetailField(label = "پاور", value = miner.powerSupplyModel ?: "—", modifier = Modifier.weight(1f))
+                            DetailField(label = "مدل", value = miner.minerType ?: "—", modifier = Modifier.weight(1f))
+                        }
+                    }
                 }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
             // ===== وضعیت: زمان فعالیت / تراهش / خطاها =====
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                UptimeChip(miner = miner)
-                StatChip(
-                    label = "تراهش",
-                    value = miner.ghsAverageThs?.let { "%.1f TH/s".format(it) } ?: "—",
-                    color = Color(0xFF2196F3)
-                )
-                StatChip(
-                    label = "خطاها",
-                    value = "${miner.errorCodes.size}",
-                    color = if (miner.errorCodes.isNotEmpty()) MaterialTheme.colorScheme.error else Color(0xFF4CAF50)
-                )
+            EnterAnimation(delayMs = 180) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    UptimeChip(miner = miner)
+                    StatChip(
+                        label = "تراهش",
+                        value = miner.ghsAverageThs?.let { "%.1f TH/s".format(it) } ?: "—",
+                        color = Color(0xFF2196F3)
+                    )
+                    StatChip(
+                        label = "خطاها",
+                        value = "${miner.errorCodes.size}",
+                        color = if (miner.errorCodes.isNotEmpty()) MaterialTheme.colorScheme.error else Color(0xFF4CAF50)
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
             // ===== اکسپت‌ها / رجکت‌ها / توان / راندمان =====
-            SectionHeader("وضعیت استخراج")
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                StatChip(label = "اکسپت‌ها", value = miner.accepted?.let { formatNumber(it) } ?: "—", color = Color(0xFF4CAF50))
-                StatChip(
-                    label = "رجکت‌ها",
-                    value = miner.rejected?.let { formatNumber(it) } ?: "—",
-                    color = if ((miner.rejected ?: 0) > 0) MaterialTheme.colorScheme.error else Color.Unspecified
-                )
-                StatChip(label = "توان", value = miner.powerWatt?.let { "$it W" } ?: "—", color = Color(0xFFFF9800), iconVec = Icons.Filled.FlashOn)
-                // راندمان انرژی: وات به ازای هر TH/s (هرچه کمتر بهتر)
-                StatChip(
-                    label = "راندمان",
-                    value = miner.efficiencyJPerThs?.let { "%.1f J/TH".format(it) } ?: "—",
-                    color = Color(0xFF38BDF8),
-                    iconVec = Icons.Filled.Bolt
-                )
+            EnterAnimation(delayMs = 240) {
+                Column {
+                    SectionHeader("وضعیت استخراج")
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        StatChip(label = "اکسپت‌ها", value = miner.accepted?.let { formatNumber(it) } ?: "—", color = Color(0xFF4CAF50))
+                        StatChip(
+                            label = "رجکت‌ها",
+                            value = miner.rejected?.let { formatNumber(it) } ?: "—",
+                            color = if ((miner.rejected ?: 0) > 0) MaterialTheme.colorScheme.error else Color.Unspecified
+                        )
+                        StatChip(label = "توان", value = miner.powerWatt?.let { "$it W" } ?: "—", color = Color(0xFFFF9800), iconVec = Icons.Filled.FlashOn)
+                        // راندمان انرژی: وات به ازای هر TH/s (هرچه کمتر بهتر)
+                        StatChip(
+                            label = "راندمان",
+                            value = miner.efficiencyJPerThs?.let { "%.1f J/TH".format(it) } ?: "—",
+                            color = Color(0xFF38BDF8),
+                            iconVec = Icons.Filled.Bolt
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
             // ===== دما و فن =====
-            SectionHeader("دما و فن")
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                StatChip(
-                    label = "دمای میانگین",
-                    value = miner.averageTemperature?.let { "%.1f°C".format(it) } ?: "—",
-                    color = tempColor(miner.averageTemperature)
-                )
-                StatChip(
-                    label = "فن جلو (ورودی)",
-                    value = miner.fanSpeedIn?.let { "$it RPM" } ?: "—",
-                    iconVec = Icons.Filled.Air,
-                    color = Color(0xFF38BDF8)
-                )
-                StatChip(
-                    label = "فن عقب (خروجی)",
-                    value = miner.fanSpeedOut?.let { "$it RPM" } ?: "—",
-                    iconVec = Icons.Filled.Air,
-                    color = Color(0xFFB69DFF)
-                )
+            EnterAnimation(delayMs = 300) {
+                Column {
+                    SectionHeader("دما و فن")
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        StatChip(
+                            label = "دمای میانگین",
+                            value = miner.averageTemperature?.let { "%.1f°C".format(it) } ?: "—",
+                            color = tempColor(miner.averageTemperature)
+                        )
+                        StatChip(
+                            label = "فن جلو (ورودی)",
+                            value = miner.fanSpeedIn?.let { "$it RPM" } ?: "—",
+                            icon = R.drawable.ic_fan_speed,
+                            color = Color(0xFF38BDF8)
+                        )
+                        StatChip(
+                            label = "فن عقب (خروجی)",
+                            value = miner.fanSpeedOut?.let { "$it RPM" } ?: "—",
+                            icon = R.drawable.ic_fan_speed,
+                            color = Color(0xFFB69DFF)
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // ===== عملیات دستگاه: ریبوت / تغییر پول =====
-            SectionHeader("عملیات دستگاه")
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
-                    onClick = { showRebootConfirm = true },
-                    enabled = !isBusy,
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f)),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Filled.RestartAlt, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("ریبوت دستگاه")
-                }
-                OutlinedButton(
-                    onClick = { showPoolPicker = true },
-                    enabled = !isBusy,
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Filled.SwapHoriz, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("تغییر پول")
+            // ===== عملیات دستگاه: ریبوت / تغییر پول + بروزرسانی خودکار =====
+            EnterAnimation(delayMs = 360) {
+                Column {
+                    SectionHeader("عملیات دستگاه")
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(
+                            onClick = { showRebootConfirm = true },
+                            enabled = !isBusy,
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f)),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Filled.RestartAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("ریبوت دستگاه")
+                        }
+                        OutlinedButton(
+                            onClick = { showPoolPicker = true },
+                            enabled = !isBusy,
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Filled.SwapHoriz, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("تغییر پول")
+                        }
+                    }
+                    if (isBusy) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    }
+                    Text(
+                        "رمز دستگاه پیش‌فرض «admin» در نظر گرفته می‌شود؛ اگر تغییر کرده باشد به‌صورت خودکار برای وارد کردن رمز صحیح از شما سؤال می‌شود.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                    // آپشن: بروزرسانی خودکار داده‌ها تا وقتی این صفحه باز است
+                    Spacer(modifier = Modifier.height(10.dp))
+                    GlassCard(shape = RoundedCornerShape(16.dp), container = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Filled.Autorenew, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text("بروزرسانی خودکار", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        "هر ۱۰ ثانیه یک‌بار، تا وقتی این صفحه باز است",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = autoRefresh,
+                                onCheckedChange = { autoRefresh = it },
+                                colors = SwitchDefaults.colors(checkedTrackColor = MaterialTheme.colorScheme.primary)
+                            )
+                        }
+                    }
                 }
             }
-            if (isBusy) {
-                Spacer(modifier = Modifier.height(6.dp))
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            }
-            Text(
-                "رمز دستگاه پیش‌فرض «admin» در نظر گرفته می‌شود؛ اگر تغییر کرده باشد به‌صورت خودکار برای وارد کردن رمز صحیح از شما سؤال می‌شود.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 6.dp)
-            )
 
             if (miner.hashboards.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(14.dp))
-                SectionHeader("هش‌بردها")
-                val maxBoardGhs = miner.hashboards.mapNotNull { it.hashrateGhs }.maxOrNull()
-                miner.hashboards.forEach { HashboardRow(it, maxBoardGhs) }
+                EnterAnimation(delayMs = 420) {
+                    Column {
+                        SectionHeader("هش‌بردها")
+                        val maxBoardGhs = miner.hashboards.mapNotNull { it.hashrateGhs }.maxOrNull()
+                        miner.hashboards.forEach { HashboardRow(it, maxBoardGhs) }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
             // ===== وضعیت سلامت / خطاهای فعال =====
-            ErrorsSection(miner, onRetryCheck = { viewModel.refreshMiner(miner.ip) })
+            EnterAnimation(delayMs = 480) {
+                ErrorsSection(miner, onRetryCheck = { viewModel.refreshMiner(miner.ip) })
+            }
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            IncomeSection(
-                miner = miner,
-                btcPriceUsdt = btcPriceUsdt,
-                btcPriceToman = btcPriceToman,
-                usdToToman = usdToToman,
-                priceSource = priceSource,
-                networkHashrateEh = networkHashrateEh ?: 994.68
-            )
+            EnterAnimation(delayMs = 540) {
+                IncomeSection(
+                    miner = miner,
+                    btcPriceUsdt = btcPriceUsdt,
+                    btcPriceToman = btcPriceToman,
+                    usdToToman = usdToToman,
+                    priceSource = priceSource,
+                    networkHashrateEh = networkHashrateEh ?: 994.68
+                )
+            }
 
             Spacer(modifier = Modifier.height(14.dp))
-            DiagnosticsSection(minerIp = miner.ip)
+            EnterAnimation(delayMs = 600) {
+                DiagnosticsSection(minerIp = miner.ip)
+            }
 
             Spacer(modifier = Modifier.height(24.dp))
         }
