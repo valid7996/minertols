@@ -18,6 +18,7 @@ import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
@@ -42,6 +43,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
