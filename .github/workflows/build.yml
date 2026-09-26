@@ -3,8 +3,13 @@ name: Build APK
 on:
   push:
     branches: [ "main", "master" ]
+    tags: [ "v*" ]
   pull_request:
   workflow_dispatch: {}
+
+# برای ساخت Release در گیت‌هاب (فقط روی تگ‌های v*)
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -36,10 +41,18 @@ jobs:
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
 
-      # APK ریلز امضاشده (keystore داخل ریپو) — روی همه پردازنده‌ها نصب می‌شود
-      # (arm64-v8a / armeabi-v7a / x86 / x86_64) چون برنامه کد نیتیو ندارد
-      - name: Build signed release APK
+      # APKهای ریلز امضاشده با keystore اختصاصی Narcic MT:
+      # برای هر پردازنده یک فایل + نسخهٔ universal
+      - name: Build signed release APKs (per-ABI + universal)
         run: gradle assembleRelease --stacktrace
+
+      # اثبات امضا در لاگ بیلد: باید CN=Narcic MT نشان دهد (نه Android Debug)
+      - name: Verify release signature
+        run: |
+          for APK in app/build/outputs/apk/release/*.apk; do
+            echo "== $(basename $APK) =="
+            $ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs "$APK" | grep -E "Signer #1 certificate DN|SHA-256" || true
+          done
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -48,9 +61,34 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
-      - name: Upload signed release APK
+      - name: Upload signed release APKs
         uses: actions/upload-artifact@v4
         with:
           name: narcic-mt-release-apk-signed
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      # انتشار رسمی در صفحهٔ Releases گیت‌هاب — فقط وقتی تگ v* پوش شود
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## Narcic MT — نسخهٔ رسمی (امضاشده)
+
+          APK ریلز با امضای اختصاصی **Narcic MT** (`CN=Narcic MT`) — نصب و به‌روزرسانی رسمی.
+
+          ### کدام فایل برای کدام گوشی؟
+          | فایل | مناسب برای |
+          |---|---|
+          | `universal` | همهٔ دستگاه‌ها (پیشنهادی) |
+          | `arm64-v8a` | تقریباً همهٔ گوشی‌های جدید (۲۰۱۶ به بعد) |
+          | `armeabi-v7a` | گوشی‌های قدیمی ۳۲بیتی |
+          | `x86` / `x86_64` | شبیه‌سازها و تبلت‌های اینتلی |
+          EOF
+          gh release create "$TAG" \
+            --title "Narcic MT $TAG" \
+            --notes-file release-notes.md \
+            app/build/outputs/apk/release/*.apk

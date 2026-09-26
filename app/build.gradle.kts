@@ -11,8 +11,19 @@ android {
         applicationId = "com.miner.whatsminermonitor"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.0.0"
+    }
+
+    // یک APK جداگانه برای هر پردازنده + نسخهٔ universal برای همهٔ دستگاه‌ها
+    // (برنامه کد نیتیو ندارد؛ این تفکیک فقط برای انتشار مرتب در Releases است)
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+            isUniversalApk = true
+        }
     }
 
     signingConfigs {
